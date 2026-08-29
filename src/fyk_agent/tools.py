@@ -344,12 +344,19 @@ class ToolRegistry:
             for key, value in os.environ.items()
             if not any(marker in key.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD"))
         }
+        if os.name == "nt":
+            command_processor = os.environ.get("COMSPEC", "cmd.exe")
+            shell_command: list[str] | str = (
+                f'"{command_processor}" /d /s /c "{command}"'
+            )
+        else:
+            shell_command = ["/bin/sh", "-c", command]
         try:
             completed = subprocess.run(
-                command,
+                shell_command,
                 cwd=working_directory,
                 env=environment,
-                shell=True,
+                shell=False,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -435,4 +442,3 @@ def _decode_timeout_output(value: bytes | str | None) -> str:
 def _result_summary(result: dict[str, Any]) -> str:
     safe = {key: value for key, value in result.items() if key not in {"content", "stdout", "stderr"}}
     return json.dumps(safe, ensure_ascii=False, default=str)[:1000]
-

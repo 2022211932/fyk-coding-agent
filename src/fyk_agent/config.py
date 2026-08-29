@@ -29,6 +29,7 @@ class Settings:
     max_context_chars: int = 120_000
     request_timeout: int = 120
     max_retries: int = 3
+    reasoning_effort: str = "high"
 
     @classmethod
     def from_environment(cls, workspace: Path) -> "Settings":
@@ -46,6 +47,9 @@ class Settings:
             max_context_chars=_positive_int("FYK_AGENT_MAX_CONTEXT_CHARS", 800_000),
             request_timeout=_positive_int("FYK_AGENT_REQUEST_TIMEOUT", 120),
             max_retries=_positive_int("FYK_AGENT_MAX_RETRIES", 3),
+            reasoning_effort=_choice(
+                "DEEPSEEK_REASONING_EFFORT", "high", {"low", "high", "max"}
+            ),
         )
 
 
@@ -56,4 +60,12 @@ def _positive_int(name: str, default: int) -> int:
     value = int(raw)
     if value <= 0:
         raise ValueError(f"{name} must be positive")
+    return value
+
+
+def _choice(name: str, default: str, choices: set[str]) -> str:
+    value = os.getenv(name, default).strip().lower()
+    if value not in choices:
+        options = ", ".join(sorted(choices))
+        raise ValueError(f"{name} must be one of: {options}")
     return value

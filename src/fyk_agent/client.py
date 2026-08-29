@@ -35,7 +35,8 @@ class OpenAICompatibleClient:
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
-            "temperature": 0.1,
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": self.settings.reasoning_effort,
         }
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         request = Request(
@@ -76,4 +77,3 @@ class OpenAICompatibleClient:
         if not isinstance(calls, list):
             raise ModelError("tool_calls must be a list")
         return AssistantReply(content=content, tool_calls=calls, raw_message=message)
-
