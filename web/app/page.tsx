@@ -26,6 +26,13 @@ type Status = {
 };
 
 type FileEntry = { path: string; type: string; size?: number };
+type DirectoryEntry = { name: string; path: string; type: 'directory' | 'root' };
+type DirectoryListing = {
+  current: string | null;
+  parent: string | null;
+  entries: DirectoryEntry[];
+};
+type Projects = { current: string; recent: string[]; roots: DirectoryEntry[] };
 
 const demoSessions = [
   { title: '修复 slugify 测试', time: '刚刚', active: true },
@@ -41,6 +48,11 @@ export default function Home() {
   const [running, setRunning] = useState(false);
   const [connectionError, setConnectionError] = useState('');
   const [approval, setApproval] = useState<AgentEvent | null>(null);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [projects, setProjects] = useState<Projects | null>(null);
+  const [directory, setDirectory] = useState<DirectoryListing | null>(null);
+  const [pickerError, setPickerError] = useState('');
+  const [switchingWorkspace, setSwitchingWorkspace] = useState(false);
   const [sessionId] = useState(() => `web-${Date.now().toString(36)}`);
   const connection = useRef({ api: '', token: '' });
   const timelineEnd = useRef<HTMLDivElement>(null);
@@ -88,6 +100,82 @@ export default function Home() {
     const response = await fetch(`${api}/api/files?path=.`, { headers: { 'X-FYK-Token': token } });
     const data = await response.json();
     if (data.ok) setFiles(data.entries || []);
+  }
+
+  async function toggleAutomaticApproval() {
+    if (!status || running) return;
+    const { api, token } = connection.current;
+    try {
+      const response = await fetch(`${api}/api/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-FYK-Token': token },
+        body: JSON.stringify({ automatic_approval: !status.automatic_approval }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '无法切换自动审批');
+      setStatus(data);
+    } catch (error) {
+      setConnectionError(error instanceof Error ? error.message : '无法切换自动审批');
+    }
+  }
+
+  async function browseDirectory(path?: string) {
+    const { api, token } = connection.current;
+    const query = path ? `?path=${encodeURIComponent(path)}` : '';
+    setPickerError('');
+    try {
+      const response = await fetch(`${api}/api/directories${query}`, {
+        headers: { 'X-FYK-Token': token },
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '无法读取目录');
+      setDirectory(data);
+    } catch (error) {
+      setPickerError(error instanceof Error ? error.message : '无法读取目录');
+    }
+  }
+
+  async function openProjectPicker() {
+    if (!status || running) return;
+    setProjectPickerOpen(true);
+    setPickerError('');
+    const { api, token } = connection.current;
+    try {
+      const response = await fetch(`${api}/api/projects`, {
+        headers: { 'X-FYK-Token': token },
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '无法加载本地项目');
+      setProjects(data);
+      await browseDirectory(status.workspace);
+    } catch (error) {
+      setPickerError(error instanceof Error ? error.message : '无法加载本地项目');
+    }
+  }
+
+  async function selectWorkspace(path: string) {
+    if (running || switchingWorkspace) return;
+    const { api, token } = connection.current;
+    setSwitchingWorkspace(true);
+    setPickerError('');
+    try {
+      const response = await fetch(`${api}/api/workspace`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-FYK-Token': token },
+        body: JSON.stringify({ path }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '无法切换工作区');
+      setStatus(data);
+      setEvents([]);
+      setApproval(null);
+      setProjectPickerOpen(false);
+      await refreshFiles();
+    } catch (error) {
+      setPickerError(error instanceof Error ? error.message : '无法切换工作区');
+    } finally {
+      setSwitchingWorkspace(false);
+    }
   }
 
   async function submit(event: FormEvent) {
@@ -193,7 +281,7 @@ export default function Home() {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>FYK <b>Agent</b></span><span className="version">v{status?.version || '0.2'}</span></div>
-        <div className="workspace-pill"><span className={`status-dot ${connectionError ? 'offline' : ''}`} /><span className="hide-mobile">{live ? compact(status.workspace, 52) : 'Demo · '}</span>{live ? '' : 'demo-workspace'}</div>
+        <button className="workspace-pill" type="button" onClick={openProjectPicker} disabled={!live || running} title="选择本地主机上的项目"><span className={`status-dot ${connectionError ? 'offline' : ''}`} /><span className="workspace-path">{live ? compact(status.workspace, 52) : 'Demo · demo-workspace'}</span><span className="workspace-chevron">⌄</span></button>
         <div className="top-actions"><button className="icon-button" aria-label="撤销最近修改" onClick={undo}>↶</button><div className="model-chip"><span>◆</span> {status?.model || 'DeepSeek V4 Pro'}</div></div>
       </header>
 
@@ -229,7 +317,7 @@ export default function Home() {
           <form className="composer" onSubmit={submit}>
             {running && <div className="queue-toast"><span />Agent 正在执行任务</div>}
             <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={live ? '继续交给 FYK Agent 一个任务…' : '输入任务体验交互效果…'} aria-label="输入任务" rows={2} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-            <div className="composer-foot"><div><button type="button" className="mini-button">＋</button><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span></div><div><span className="mode"><i className={status?.automatic_approval ? 'enabled' : ''} /> {status?.automatic_approval ? '自动审批已开启' : '自动审批已关闭'}</span><button className="send" type="submit" disabled={!prompt.trim() || running}>{running ? '执行中…' : '运行任务'} <span>↵</span></button></div></div>
+            <div className="composer-foot"><div><button type="button" className="mini-button">＋</button><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span></div><div><button type="button" className={`approval-switch ${status?.automatic_approval ? 'enabled' : ''}`} role="switch" aria-checked={Boolean(status?.automatic_approval)} onClick={toggleAutomaticApproval} disabled={!live || running} title="开启后，写文件和运行命令将不再逐次询问"><span><i /></span>{status?.automatic_approval ? '自动审批' : '手动审批'}</button><button className="send" type="submit" disabled={!prompt.trim() || running}>{running ? '执行中…' : '运行任务'} <span>↵</span></button></div></div>
           </form>
         </section>
 
@@ -245,6 +333,7 @@ export default function Home() {
       </div>
 
       {approval && <ApprovalDialog event={approval} onDecision={decide} />}
+      {projectPickerOpen && <ProjectPicker projects={projects} directory={directory} error={pickerError} switching={switchingWorkspace} onBrowse={browseDirectory} onSelect={selectWorkspace} onClose={() => setProjectPickerOpen(false)} />}
     </main>
   );
 }
@@ -289,6 +378,50 @@ function ApprovalDialog({ event, onDecision }: { event: AgentEvent; onDecision: 
   return <div className="modal-backdrop"><section className="approval-dialog" role="dialog" aria-modal="true" aria-labelledby="approval-title"><div className="approval-symbol">!</div><p className="eyebrow">PERMISSION REQUIRED</p><h2 id="approval-title">允许 Agent 执行此操作？</h2><div className="approval-operation"><span className="activity-icon">{toolIcon(event.tool)}</span><div><b>{toolLabel(event)}</b><small>{toolDetail(event)}</small></div></div><p>此操作可能修改工作区或执行本地命令。请确认内容符合你的预期。</p><div className="approval-actions"><button onClick={() => onDecision('reject')}>拒绝</button><button onClick={() => onDecision('allow_all')}>本次会话全部允许</button><button className="primary" onClick={() => onDecision('allow')}>允许一次</button></div></section></div>;
 }
 
+function ProjectPicker({ projects, directory, error, switching, onBrowse, onSelect, onClose }: { projects: Projects | null; directory: DirectoryListing | null; error: string; switching: boolean; onBrowse: (path?: string) => void; onSelect: (path: string) => void; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop">
+      <section className="project-dialog" role="dialog" aria-modal="true" aria-labelledby="project-title">
+        <header>
+          <div><p className="eyebrow">LOCAL WORKSPACES</p><h2 id="project-title">选择本地主机项目</h2><p>选择后，Agent 的文件和命令操作都会限制在该目录内。</p></div>
+          <button className="dialog-close" type="button" onClick={onClose} aria-label="关闭项目选择器">×</button>
+        </header>
+        <div className="project-picker-body">
+          <aside>
+            <div className="picker-section-title">最近项目</div>
+            <div className="recent-projects">
+              {projects?.recent.length ? projects.recent.map((path) => (
+                <button type="button" key={path} className={path === projects.current ? 'current' : ''} onClick={() => onSelect(path)} disabled={switching}>
+                  <span>◇</span><div><b>{projectName(path)}</b><small>{path}</small></div>{path === projects.current && <em>当前</em>}
+                </button>
+              )) : <p>还没有最近项目</p>}
+            </div>
+            <button className="computer-button" type="button" onClick={() => onBrowse()}><span>▦</span><b>此电脑</b></button>
+          </aside>
+          <section className="directory-browser">
+            <div className="directory-toolbar">
+              <button type="button" onClick={() => directory?.parent ? onBrowse(directory.parent) : onBrowse()} disabled={!directory}>←</button>
+              <div><small>当前文件夹</small><b>{directory?.current || '此电脑'}</b></div>
+            </div>
+            {error && <div className="picker-error">{error}</div>}
+            <div className="directory-list">
+              {directory?.entries.length ? directory.entries.map((entry) => (
+                <button type="button" key={entry.path} onClick={() => onBrowse(entry.path)}>
+                  <span>{entry.type === 'root' ? '▣' : '▾'}</span><div><b>{entry.name}</b><small>{entry.path}</small></div><em>›</em>
+                </button>
+              )) : <div className="picker-empty">{directory ? '该目录中没有子文件夹' : '正在读取本地目录…'}</div>}
+            </div>
+            <footer>
+              <span>以后直接运行 <code>fyk-agent --web</code> 将自动打开最近项目</span>
+              <button className="select-folder" type="button" onClick={() => directory?.current && onSelect(directory.current)} disabled={!directory?.current || switching}>{switching ? '正在切换…' : '选择当前文件夹'}</button>
+            </footer>
+          </section>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function DemoTimeline() {
   return <><article className="user-turn"><div className="avatar user-avatar">FY</div><div className="turn-body"><div className="turn-meta"><b>你</b><time>15:42:08</time></div><p>修复 slugify，使全部测试通过；不要修改测试，并在结束前运行完整测试。</p></div></article><article className="agent-turn"><div className="avatar agent-avatar"><span>◆</span></div><div className="turn-body"><div className="turn-meta"><b>FYK Agent</b><span className="thinking-label">思考与执行</span><time>15:42:09</time></div><div className="activity-stack"><DemoActivity icon="⌕" title="浏览工作区" detail="发现 3 个文件" meta="84ms" /><DemoActivity icon="≡" title="读取 3 个文件" detail="README.md · slugify.py · test_slugify.py" meta="12ms" /><DemoActivity icon="›_" title="运行测试" detail="python -m unittest -v" meta="EXIT 1" warning /></div><div className="terminal-card"><div className="terminal-bar"><span /><span /><span /><b>TEST OUTPUT</b><button>复制</button></div><pre><span className="muted">Ran 5 tests in 0.006s</span>{'\n'}<span className="error">FAILED (failures=4)</span>{'\n'}<span className="muted">AssertionError: &apos;hello,-world!&apos; != &apos;hello-world&apos;</span></pre></div><div className="activity-stack second"><DemoActivity icon="±" title="编辑 slugify.py" detail="+12 −1 · 已创建恢复点" meta="M" /><DemoActivity icon="›_" title="重新运行测试" detail="5 passed · 0 failed" meta="PASS" /></div><div className="answer-card"><div className="answer-title"><span>✓</span><b>任务完成</b><small>6 个模型步骤</small></div><p>已修复 <code>slugify.py</code>：加入 Unicode 规范化，过滤标点并合并分隔符；空结果会抛出明确异常。测试文件未修改。</p><div className="verification"><span>✓</span><b>验证通过</b><code>Ran 5 tests · OK</code></div></div></div></article></>;
 }
@@ -301,4 +434,5 @@ function toolIcon(tool?: string) { return ({ list_files: '⌕', read_file: '≡'
 function toolLabel(event: AgentEvent) { const args = event.arguments || {}; const path = String(args.path || '.'); return ({ list_files: `浏览 ${path}`, read_file: `读取 ${path}`, search_text: `搜索 “${args.query || ''}”`, write_file: `写入 ${path}`, edit_file: `编辑 ${path}`, make_directory: `创建目录 ${path}`, run_command: `运行 ${compact(String(args.command || ''), 90)}` } as Record<string, string>)[event.tool || ''] || String(event.tool || 'Agent 操作'); }
 function toolDetail(event: AgentEvent) { const args = event.arguments || {}; if (event.tool === 'run_command') return String(args.command || ''); if (args.content_lines) return `${args.content_lines} 行内容`; if (args.old_text_lines || args.new_text_lines) return `替换 ${args.old_text_lines || 0} → ${args.new_text_lines || 0} 行`; return String(args.path || args.query || ''); }
 function compact(value: string, limit: number) { const normalized = value.replace(/\s+/g, ' ').trim(); return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}…`; }
+function projectName(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) || path; }
 function now() { return new Date().toLocaleTimeString('zh-CN', { hour12: false }); }

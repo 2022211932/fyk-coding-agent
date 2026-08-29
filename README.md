@@ -59,10 +59,12 @@ fyk-agent --workspace D:\path\to\project
 启动可视化控制台：
 
 ```powershell
-fyk-agent --web --workspace D:\path\to\project
+fyk-agent --web
 ```
 
-该命令会在浏览器打开 FYK Agent Console。中央时间线实时显示用户指令、模型轮次、工具调用及结果；右侧同步显示工作区文件和修改摘要。写文件、建目录和执行命令仍会弹出审批窗口，可选择本次允许、会话内全部允许或拒绝。控制接口只监听 `127.0.0.1`，并使用启动时生成的随机令牌验证请求。
+该命令会在浏览器打开 FYK Agent Console。点击顶部工作区路径，可以从最近项目或“此电脑”浏览并选择本机项目；选择结果会被记住，下次执行 `fyk-agent --web` 时自动恢复，无需重复填写 `--workspace`。首次启动默认使用当前目录，也仍可用 `--workspace` 指定初始项目。
+
+中央时间线实时显示用户指令、模型轮次、工具调用及结果；右侧同步显示工作区文件和修改摘要。输入框右侧的审批开关可在手动审批与自动审批之间切换。手动模式下，写文件、建目录和执行命令会弹出审批窗口；自动模式只应在可信项目中开启。控制接口只监听 `127.0.0.1`，并使用启动时生成的随机令牌验证请求。
 
 启动后可以连续输入任务，后续任务会保留本次会话中之前的用户指令、模型回答和工具结果：
 
@@ -91,7 +93,7 @@ fyk-agent --web --workspace D:\path\to\project
 常用选项：
 
 ```text
--w, --workspace PATH   限定 Agent 可访问的根目录
+-w, --workspace PATH   限定 Agent 可访问的根目录（Web 模式会记住最近项目）
 -y, --yes              自动批准写入和命令执行
 --model MODEL          临时覆盖模型
 --max-steps N          临时覆盖最大模型轮数
@@ -140,6 +142,8 @@ fyk-agent --web --workspace D:\path\to\project
 ```
 
 事件日志不记录 API Key；审批界面对大段文件内容只显示字符数。
+
+Web 控制台的最近项目列表保存在当前用户的本机配置目录：Windows 为 `%LOCALAPPDATA%\fyk-coding-agent\settings.json`，macOS/Linux 为 `$XDG_CONFIG_HOME/fyk-coding-agent/settings.json`（未设置时使用 `~/.config`）。其中只包含最近工作区路径，不包含 API Key。
 
 ## 测试
 

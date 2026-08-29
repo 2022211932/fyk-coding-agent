@@ -22,7 +22,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="FYK Coding Agent - an interactive coding agent powered by DeepSeek",
     )
     parser.add_argument("task", nargs="*", help="Programming task; omit to open the coding shell")
-    parser.add_argument("-w", "--workspace", default=".", help="Workspace directory (default: .)")
+    parser.add_argument(
+        "-w",
+        "--workspace",
+        help="Workspace directory (web mode remembers the last selected project)",
+    )
     parser.add_argument("-y", "--yes", action="store_true", help="Approve all state-changing tools")
     parser.add_argument("--model", help="Override DEEPSEEK_MODEL for this session")
     parser.add_argument("--max-steps", type=int, help="Maximum model steps per user prompt")
@@ -55,7 +59,13 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     ui = TerminalUI(color=False if args.no_color else None)
     try:
-        workspace = Workspace(Path(args.workspace))
+        workspace_path = args.workspace
+        if args.web and workspace_path is None:
+            from .web import load_last_workspace
+
+            remembered = load_last_workspace()
+            workspace_path = str(remembered) if remembered else "."
+        workspace = Workspace(Path(workspace_path or "."))
         settings = Settings.from_environment(workspace.root)
         if args.model:
             settings = _replace_setting(settings, model=args.model)

@@ -9,6 +9,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from typing import Any, Callable
@@ -45,20 +46,94 @@ class WebAgentState:
         token: str,
         frontend_port: int,
         automatic_approval: bool,
+        config_path: Path | None = None,
     ):
         self.settings = settings
         self.workspace = workspace
         self.token = token
         self.frontend_port = frontend_port
         self.automatic_approval = automatic_approval
+        self.config_path = config_path or _default_config_path()
+        self.state_lock = threading.RLock()
         self.sessions: dict[str, WebSession] = {}
         self.sessions_lock = threading.Lock()
         self.approvals: dict[str, PendingApproval] = {}
         self.approvals_lock = threading.Lock()
+        try:
+            _remember_workspace(workspace.root, self.config_path)
+        except OSError:
+            # The console remains usable when the host configuration directory
+            # is read-only; only recent-project persistence is unavailable.
+            pass
 
     def session(self, session_id: str) -> WebSession:
         with self.sessions_lock:
             return self.sessions.setdefault(session_id, WebSession())
+
+    def status(self) -> dict[str, Any]:
+        with self.state_lock:
+            return {
+                "ok": True,
+                "version": __version__,
+                "model": self.settings.model,
+                "workspace": str(self.workspace.root),
+                "automatic_approval": self.automatic_approval,
+            }
+
+    def set_automatic_approval(self, enabled: bool) -> dict[str, Any]:
+        with self.state_lock:
+            self.automatic_approval = enabled
+            return self.status()
+
+    def select_workspace(self, path: str) -> tuple[bool, dict[str, Any]]:
+        try:
+            selected = Workspace(Path(path))
+        except (ValueError, OSError) as exc:
+            return False, {"ok": False, "error": str(exc)}
+        with self.state_lock:
+            with self.sessions_lock:
+                if any(session.running for session in self.sessions.values()):
+                    return False, {"ok": False, "error": "任务运行时不能切换工作区"}
+                self.workspace = selected
+                self.sessions.clear()
+            result = self.status()
+            try:
+                _remember_workspace(selected.root, self.config_path)
+            except OSError:
+                result["warning"] = "项目已切换，但无法保存到最近项目"
+            return True, result
+
+    def projects(self) -> dict[str, Any]:
+        with self.state_lock:
+            recent = [str(path) for path in load_recent_workspaces(self.config_path)]
+            return {
+                "ok": True,
+                "current": str(self.workspace.root),
+                "recent": recent,
+                "roots": _directory_roots(),
+            }
+
+    def directories(self, path: str | None) -> dict[str, Any]:
+        if path is None:
+            return {"ok": True, "current": None, "parent": None, "entries": _directory_roots()}
+        selected = Path(path).expanduser()
+        if not selected.is_absolute():
+            raise ValueError("目录浏览只接受本地主机绝对路径")
+        resolved = selected.resolve()
+        if not resolved.is_dir():
+            raise ValueError(f"目录不存在: {resolved}")
+        entries: list[dict[str, str]] = []
+        try:
+            children = sorted(
+                (item for item in resolved.iterdir() if item.is_dir()),
+                key=lambda item: item.name.lower(),
+            )
+        except (OSError, PermissionError) as exc:
+            raise ValueError(f"无法读取目录: {resolved}") from exc
+        for child in children[:500]:
+            entries.append({"name": child.name, "path": str(child), "type": "directory"})
+        parent = None if resolved.parent == resolved else str(resolved.parent)
+        return {"ok": True, "current": str(resolved), "parent": parent, "entries": entries}
 
     def request_approval(
         self,
@@ -80,7 +155,7 @@ class WebAgentState:
         with self.approvals_lock:
             self.approvals.pop(approval_id, None)
         if pending.decision == "allow_all":
-            self.automatic_approval = True
+            self.set_automatic_approval(True)
             return True
         return pending.decision == "allow"
 
@@ -181,21 +256,25 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                 return
             parsed = urlparse(self.path)
             if parsed.path == "/api/status":
-                self._json(
-                    200,
-                    {
-                        "ok": True,
-                        "version": __version__,
-                        "model": state.settings.model,
-                        "workspace": str(state.workspace.root),
-                        "automatic_approval": state.automatic_approval,
-                    },
-                )
+                self._json(200, state.status())
+                return
+            if parsed.path == "/api/projects":
+                self._json(200, state.projects())
+                return
+            if parsed.path == "/api/directories":
+                query = parse_qs(parsed.query)
+                path = query.get("path", [None])[0]
+                try:
+                    self._json(200, state.directories(path))
+                except ValueError as exc:
+                    self._json(400, {"ok": False, "error": str(exc)})
                 return
             if parsed.path == "/api/files":
                 query = parse_qs(parsed.query)
                 path = query.get("path", ["."])[0]
-                registry = ToolRegistry(state.workspace)
+                with state.state_lock:
+                    workspace = state.workspace
+                registry = ToolRegistry(workspace)
                 self._json(200, registry.execute("list_files", {"path": path, "max_results": 300}))
                 return
             self._json(404, {"ok": False, "error": "Not found"})
@@ -210,6 +289,21 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
             if parsed.path == "/api/chat":
                 self._chat(body)
                 return
+            if parsed.path == "/api/settings":
+                enabled = body.get("automatic_approval")
+                if not isinstance(enabled, bool):
+                    self._json(400, {"ok": False, "error": "automatic_approval must be boolean"})
+                    return
+                self._json(200, state.set_automatic_approval(enabled))
+                return
+            if parsed.path == "/api/workspace":
+                path = body.get("path")
+                if not isinstance(path, str) or not path.strip():
+                    self._json(400, {"ok": False, "error": "path must be a non-empty string"})
+                    return
+                selected, result = state.select_workspace(path)
+                self._json(200 if selected else 409, result)
+                return
             approval_match = re.fullmatch(r"/api/approvals/([A-Za-z0-9_-]+)", parsed.path)
             if approval_match:
                 decision = str(body.get("decision", "reject"))
@@ -220,16 +314,19 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                 self._json(200 if found else 404, {"ok": found})
                 return
             if parsed.path == "/api/undo":
-                self._json(200, ToolRegistry(state.workspace).undo_last())
+                with state.state_lock:
+                    workspace = state.workspace
+                self._json(200, ToolRegistry(workspace).undo_last())
                 return
             if parsed.path == "/api/clear":
                 session_id = str(body.get("session_id", "default"))[:100]
-                session = state.session(session_id)
-                with session.lock:
-                    if session.running:
-                        self._json(409, {"ok": False, "error": "A task is still running"})
-                        return
-                    session.history = None
+                with state.state_lock:
+                    session = state.session(session_id)
+                    with session.lock:
+                        if session.running:
+                            self._json(409, {"ok": False, "error": "A task is still running"})
+                            return
+                        session.history = None
                 self._json(200, {"ok": True})
                 return
             self._json(404, {"ok": False, "error": "Not found"})
@@ -240,12 +337,14 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
             if not message or len(message) > 100_000:
                 self._json(400, {"ok": False, "error": "message is empty or too large"})
                 return
-            session = state.session(session_id)
-            with session.lock:
-                if session.running:
-                    self._json(409, {"ok": False, "error": "This session already has a running task"})
-                    return
-                session.running = True
+            with state.state_lock:
+                session = state.session(session_id)
+                with session.lock:
+                    if session.running:
+                        self._json(409, {"ok": False, "error": "This session already has a running task"})
+                        return
+                    session.running = True
+                workspace = state.workspace
 
             self.send_response(200)
             self._cors_headers()
@@ -265,7 +364,7 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                 self.wfile.flush()
 
             registry = ToolRegistry(
-                state.workspace,
+                workspace,
                 approve=lambda name, arguments: state.request_approval(name, arguments, emit),
             )
             agent = CodingAgent(
@@ -293,8 +392,9 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
             except (BrokenPipeError, ConnectionResetError):
                 pass
             finally:
-                with session.lock:
-                    session.running = False
+                with state.state_lock:
+                    with session.lock:
+                        session.running = False
                 self.close_connection = True
 
         def _authorized(self) -> bool:
@@ -360,6 +460,69 @@ def _safe_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         else:
             safe[key] = value
     return safe
+
+
+def _default_config_path() -> Path:
+    if os.name == "nt" and os.getenv("LOCALAPPDATA"):
+        base = Path(os.environ["LOCALAPPDATA"])
+    else:
+        base = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return base / "fyk-coding-agent" / "settings.json"
+
+
+def load_recent_workspaces(config_path: Path | None = None) -> list[Path]:
+    target = config_path or _default_config_path()
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return []
+    raw_paths = payload.get("recent_workspaces", []) if isinstance(payload, dict) else []
+    recent: list[Path] = []
+    for raw_path in raw_paths if isinstance(raw_paths, list) else []:
+        try:
+            path = Path(str(raw_path)).expanduser().resolve()
+        except (OSError, ValueError):
+            continue
+        if path.is_dir() and path not in recent:
+            recent.append(path)
+    return recent[:10]
+
+
+def load_last_workspace(config_path: Path | None = None) -> Path | None:
+    recent = load_recent_workspaces(config_path)
+    return recent[0] if recent else None
+
+
+def _remember_workspace(path: Path, config_path: Path) -> None:
+    resolved = path.resolve()
+    recent = [resolved, *(item for item in load_recent_workspaces(config_path) if item != resolved)]
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {"recent_workspaces": [str(item) for item in recent[:10]]},
+        ensure_ascii=False,
+        indent=2,
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="", dir=config_path.parent, delete=False
+    ) as handle:
+        handle.write(payload + "\n")
+        temporary = Path(handle.name)
+    try:
+        os.replace(temporary, config_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _directory_roots() -> list[dict[str, str]]:
+    if os.name == "nt":
+        roots = [Path(f"{chr(letter)}:\\") for letter in range(ord("A"), ord("Z") + 1)]
+        return [
+            {"name": str(root), "path": str(root), "type": "root"}
+            for root in roots
+            if root.exists()
+        ]
+    return [{"name": "/", "path": "/", "type": "root"}]
 
 
 def _safe_web_event(kind: str, data: dict[str, Any]) -> dict[str, Any]:
