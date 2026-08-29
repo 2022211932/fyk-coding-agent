@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_console_encoding()
     args = build_parser().parse_args(argv)
     try:
         workspace = Workspace(Path(args.workspace))
@@ -149,6 +150,14 @@ def _replace_setting(settings: Settings, **changes: Any) -> Settings:
     return Settings(**values)
 
 
+def _configure_console_encoding() -> None:
+    if os.name != "nt":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
-

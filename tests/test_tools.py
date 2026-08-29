@@ -57,6 +57,15 @@ class ToolRegistryTests(unittest.TestCase):
         listing = self.registry.execute("list_files", {"path": "src"})
         self.assertEqual({item["path"] for item in listing["entries"]}, {"src/a.py", "src/b.txt"})
 
+    def test_recursive_tools_do_not_expose_dotenv(self) -> None:
+        (self.root / ".env").write_text("DEEPSEEK_API_KEY=secret-marker\n", encoding="utf-8")
+        (self.root / "safe.txt").write_text("secret-marker is documentation\n", encoding="utf-8")
+        listing = self.registry.execute("list_files", {"path": "."})
+        paths = {item["path"] for item in listing["entries"]}
+        self.assertNotIn(".env", paths)
+        search = self.registry.execute("search_text", {"query": "secret-marker", "path": "."})
+        self.assertEqual([match["path"] for match in search["matches"]], ["safe.txt"])
+
     def test_rejected_write_does_not_change_file(self) -> None:
         registry = ToolRegistry(Workspace(self.root), approve=lambda _name, _args: False)
         result = registry.execute("write_file", {"path": "no.txt", "content": "blocked"})
@@ -81,4 +90,3 @@ class ToolRegistryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

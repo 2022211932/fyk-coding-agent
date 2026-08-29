@@ -208,7 +208,11 @@ class ToolRegistry:
                 (item, "file") for item in sorted(files)
             ]:
                 item_path = Path(current) / name
-                relative = self.workspace.relative(item_path)
+                try:
+                    relative = self.workspace.relative(item_path)
+                    self.workspace.resolve(relative, must_exist=True)
+                except (ValueError, WorkspaceError, OSError):
+                    continue
                 if fnmatch.fnmatch(relative, pattern) or pattern == "*":
                     entry: dict[str, Any] = {"path": relative, "type": kind}
                     if kind == "file":
@@ -259,7 +263,11 @@ class ToolRegistry:
         for candidate in candidates:
             if not candidate.is_file() or not fnmatch.fnmatch(candidate.name, file_glob):
                 continue
-            relative = self.workspace.relative(candidate)
+            try:
+                relative = self.workspace.relative(candidate)
+                self.workspace.resolve(relative, must_exist=True)
+            except (ValueError, WorkspaceError, OSError):
+                continue
             if any(part in {".git", ".fyk-agent", "__pycache__"} for part in candidate.parts):
                 continue
             try:
