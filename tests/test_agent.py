@@ -61,7 +61,38 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(result.stop_reason, "step_limit")
         self.assertEqual(result.steps, 2)
 
+    def test_second_prompt_continues_the_same_conversation(self) -> None:
+        first_reply = AssistantReply("First answer", [], {"role": "assistant", "content": "First answer"})
+        second_reply = AssistantReply("Second answer", [], {"role": "assistant", "content": "Second answer"})
+        client = FakeClient([first_reply, second_reply])
+        agent = CodingAgent(client, self.registry)
+        first = agent.run("First prompt")
+        second = agent.run("Follow-up prompt", history=first.messages)
+        second_request = client.requests[1]
+        self.assertEqual(
+            [(message["role"], message.get("content")) for message in second_request],
+            [
+                ("system", second_request[0]["content"]),
+                ("user", "First prompt"),
+                ("assistant", "First answer"),
+                ("user", "Follow-up prompt"),
+            ],
+        )
+        self.assertEqual(second.final_text, "Second answer")
+
+    def test_invalid_conversation_history_is_rejected(self) -> None:
+        client = FakeClient([])
+        with self.assertRaisesRegex(ValueError, "system message"):
+            CodingAgent(client, self.registry).run(
+                "Continue", history=[{"role": "user", "content": "orphan"}]
+            )
+
+    def test_clear_context_resets_compaction_counter(self) -> None:
+        agent = CodingAgent(FakeClient([]), self.registry)
+        agent.context.compactions = 4
+        agent.clear_context()
+        self.assertEqual(agent.context.compactions, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
-

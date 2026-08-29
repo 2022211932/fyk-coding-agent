@@ -46,17 +46,35 @@ python -m pip install -e .
 fyk-agent --workspace D:\path\to\project "阅读项目，修复失败的测试并验证"
 ```
 
-进入交互模式：
+进入类似 Claude Code 的常驻交互模式：
 
 ```powershell
 fyk-agent --workspace D:\path\to\project
 ```
 
-交互命令：
+启动后可以连续输入任务，后续任务会保留本次会话中之前的用户指令、模型回答和工具结果：
 
-- `:undo`：恢复最近一次 `write_file` 或 `edit_file` 之前的文件状态；
-- `:help`：显示帮助；
-- `:quit`：退出。
+```text
+╭─ FYK Coding Agent 0.2.0 ──────────────────────────────────────────────╮
+│  Model      deepseek-v4-pro
+│  Workspace  D:\path\to\project
+│  Safety     ask before changes
+│  /help for commands · /exit to quit
+╰───────────────────────────────────────────────────────────────────────╯
+
+❯ 阅读项目并告诉我测试入口
+```
+
+斜杠命令：
+
+- `/help`：显示命令列表；
+- `/status`：显示模型、工作区、审批模式和上下文大小；
+- `/history`：显示当前会话的用户指令；
+- `/clear`：清空对话上下文，但不改变文件；
+- `/undo`：恢复最近一次 `write_file` 或 `edit_file` 之前的文件状态；
+- `/exit`：退出。
+
+在行尾输入 `\` 可以继续编写多行任务。修改操作的审批提示支持 `y`（本次允许）、`n`（拒绝）和 `a`（本次会话后续全部允许）。旧的 `:undo`、`:help` 等写法仍兼容。
 
 常用选项：
 
@@ -65,6 +83,7 @@ fyk-agent --workspace D:\path\to\project
 -y, --yes              自动批准写入和命令执行
 --model MODEL          临时覆盖模型
 --max-steps N          临时覆盖最大模型轮数
+--no-color             关闭 ANSI 颜色
 ```
 
 ## 运行机制

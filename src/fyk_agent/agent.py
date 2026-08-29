@@ -62,14 +62,29 @@ class CodingAgent:
         self.events = EventLog(tools.workspace.root)
         self.notify = notify or (lambda _kind, _data: None)
 
-    def run(self, task: str) -> RunResult:
+    def run(
+        self,
+        task: str,
+        history: list[dict[str, Any]] | None = None,
+    ) -> RunResult:
         if not isinstance(task, str) or not task.strip():
             raise ValueError("Task must be a non-empty string")
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": task.strip()},
-        ]
-        self.events.emit("run_started", task=task.strip()[:2000], max_steps=self.max_steps)
+        if history is None:
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": task.strip()},
+            ]
+        else:
+            if not history or history[0].get("role") != "system":
+                raise ValueError("Conversation history must begin with a system message")
+            messages = [dict(message) for message in history]
+            messages.append({"role": "user", "content": task.strip()})
+        self.events.emit(
+            "run_started",
+            task=task.strip()[:2000],
+            max_steps=self.max_steps,
+            continued=history is not None,
+        )
 
         for step in range(1, self.max_steps + 1):
             self.notify("model_request", {"step": step, "message_count": len(messages)})
@@ -120,7 +135,12 @@ class CodingAgent:
                 )
                 self.notify(
                     "tool_result",
-                    {"step": step, "tool": name, "ok": result.get("ok", False)},
+                    {
+                        "step": step,
+                        "tool": name,
+                        "ok": result.get("ok", False),
+                        "result": result,
+                    },
                 )
 
             previous_count = self.context.compactions
@@ -146,6 +166,10 @@ class CodingAgent:
             messages,
             self.context.compactions,
         )
+
+    def clear_context(self) -> None:
+        self.context = ContextManager(self.context.max_chars)
+        self.events.emit("session_cleared")
 
 
 def _assistant_message(reply: AssistantReply) -> dict[str, Any]:
@@ -182,4 +206,3 @@ def _parse_tool_call(
     if not isinstance(arguments, dict):
         return call_id, name, {}, "Decoded tool arguments must be an object"
     return call_id, name, arguments, None
-

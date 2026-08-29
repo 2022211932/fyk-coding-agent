@@ -8,30 +8,49 @@ import sys
 from typing import Any
 
 from . import __version__
-from .agent import CodingAgent
+from .agent import CodingAgent, RunResult
 from .client import ModelError, OpenAICompatibleClient
 from .config import Settings
 from .tools import ToolRegistry
+from .ui import TerminalUI
 from .workspace import Workspace, WorkspaceError
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fyk-agent",
-        description="FYK Coding Agent - a local, auditable coding agent powered by DeepSeek",
+        description="FYK Coding Agent - an interactive coding agent powered by DeepSeek",
     )
-    parser.add_argument("task", nargs="*", help="Programming task; omit to enter interactive mode")
+    parser.add_argument("task", nargs="*", help="Programming task; omit to open the coding shell")
     parser.add_argument("-w", "--workspace", default=".", help="Workspace directory (default: .)")
     parser.add_argument("-y", "--yes", action="store_true", help="Approve all state-changing tools")
-    parser.add_argument("--model", help="Override DEEPSEEK_MODEL for this run")
-    parser.add_argument("--max-steps", type=int, help="Override the maximum number of model steps")
+    parser.add_argument("--model", help="Override DEEPSEEK_MODEL for this session")
+    parser.add_argument("--max-steps", type=int, help="Maximum model steps per user prompt")
+    parser.add_argument("--no-color", action="store_true", help="Disable ANSI terminal colors")
     parser.add_argument("--version", action="version", version=f"FYK Coding Agent {__version__}")
     return parser
+
+
+class ApprovalController:
+    def __init__(self, ui: TerminalUI, approve_all: bool = False):
+        self.ui = ui
+        self.approve_all = approve_all
+
+    def __call__(self, name: str, arguments: dict[str, Any]) -> bool:
+        if self.approve_all:
+            return True
+        answer = self.ui.approval(name, _safe_arguments(arguments))
+        if answer in {"a", "all"}:
+            self.approve_all = True
+            self.ui.notice("Automatic approval enabled for the rest of this session.")
+            return True
+        return answer in {"y", "yes"}
 
 
 def main(argv: list[str] | None = None) -> int:
     _configure_console_encoding()
     args = build_parser().parse_args(argv)
+    ui = TerminalUI(color=False if args.no_color else None)
     try:
         workspace = Workspace(Path(args.workspace))
         settings = Settings.from_environment(workspace.root)
@@ -42,97 +61,133 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("--max-steps must be positive")
             settings = _replace_setting(settings, max_steps=args.max_steps)
     except (ValueError, WorkspaceError) as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
+        ui.error(f"Configuration error: {exc}")
         return 2
 
-    approve = _always_approve if args.yes else _interactive_approval
-    registry = ToolRegistry(workspace, approve=approve)
+    approvals = ApprovalController(ui, approve_all=args.yes)
+    registry = ToolRegistry(workspace, approve=approvals)
     agent = CodingAgent(
         OpenAICompatibleClient(settings),
         registry,
         max_steps=settings.max_steps,
         max_context_chars=settings.max_context_chars,
-        notify=_terminal_notification,
+        notify=lambda kind, data: _terminal_notification(ui, kind, data),
     )
-    print(
-        f"FYK Coding Agent | model={settings.model} | workspace={workspace.root}\n"
-        f"Approval mode: {'automatic' if args.yes else 'interactive'}"
+    ui.banner(
+        version=__version__,
+        model=settings.model,
+        workspace=workspace.root,
+        automatic_approval=approvals.approve_all,
     )
 
-    tasks = [" ".join(args.task)] if args.task else None
+    task = " ".join(args.task).strip()
     try:
-        if tasks:
-            return _run_task(agent, tasks[0])
-        return _interactive_loop(agent, registry)
+        if task:
+            result = _run_task(agent, task, ui)
+            return 0 if result.stop_reason == "completed" else 3
+        return _interactive_loop(agent, registry, approvals, settings, ui)
     except KeyboardInterrupt:
-        print("\nCancelled by user.", file=sys.stderr)
+        ui.error("\nCancelled by user.")
         return 130
     except ModelError as exc:
-        print(f"Model error: {exc}", file=sys.stderr)
+        ui.error(f"Model error: {exc}")
         return 1
 
 
-def _interactive_loop(agent: CodingAgent, registry: ToolRegistry) -> int:
-    print("Enter a task, :undo to revert the last file write, :help for commands, or :quit.")
+def _interactive_loop(
+    agent: CodingAgent,
+    registry: ToolRegistry,
+    approvals: ApprovalController,
+    settings: Settings,
+    ui: TerminalUI,
+) -> int:
+    history: list[dict[str, Any]] | None = None
     while True:
         try:
-            task = input("\nfyk> ").strip()
+            task = ui.prompt()
         except EOFError:
-            print()
+            ui.write()
             return 0
         if not task:
             continue
-        if task in {":quit", ":q", "quit", "exit"}:
+        command = task.lower()
+        if command in {"/exit", "/quit", ":quit", ":q"}:
             return 0
-        if task == ":help":
-            print(":undo  restore the file state before the latest write/edit")
-            print(":quit  exit FYK Coding Agent")
+        if command in {"/help", ":help"}:
+            ui.help()
             continue
-        if task == ":undo":
-            print(json.dumps(registry.undo_last(), ensure_ascii=False, indent=2))
+        if command in {"/clear", ":clear"}:
+            history = None
+            agent.clear_context()
+            ui.notice("Conversation cleared. Workspace files were not changed.")
             continue
-        _run_task(agent, task)
+        if command in {"/undo", ":undo"}:
+            undo_result = registry.undo_last()
+            if undo_result.get("ok"):
+                ui.notice(f"Restored {undo_result['path']}")
+            else:
+                ui.error(str(undo_result.get("error", "Nothing to undo")))
+            continue
+        if command in {"/status", ":status"}:
+            ui.status(
+                model=settings.model,
+                workspace=registry.workspace.root,
+                automatic_approval=approvals.approve_all,
+                history=history,
+            )
+            continue
+        if command in {"/history", ":history"}:
+            ui.history(history)
+            continue
+        if task.startswith("/") or task.startswith(":"):
+            ui.error(f"Unknown command: {task}. Use /help to list commands.")
+            continue
+        try:
+            result = _run_task(agent, task, ui, history=history)
+            history = result.messages
+        except ModelError as exc:
+            ui.error(f"Model error: {exc}")
 
 
-def _run_task(agent: CodingAgent, task: str) -> int:
-    result = agent.run(task)
-    print("\nAgent result:\n" + result.final_text)
-    print(
-        f"\n[steps={result.steps}, stop={result.stop_reason}, "
-        f"context_compactions={result.context_compactions}]"
+def _run_task(
+    agent: CodingAgent,
+    task: str,
+    ui: TerminalUI,
+    *,
+    history: list[dict[str, Any]] | None = None,
+) -> RunResult:
+    result = agent.run(task, history=history)
+    ui.answer(
+        result.final_text,
+        steps=result.steps,
+        stop_reason=result.stop_reason,
+        compactions=result.context_compactions,
     )
-    return 0 if result.stop_reason == "completed" else 3
+    return result
 
 
-def _always_approve(_name: str, _arguments: dict[str, Any]) -> bool:
-    return True
+def _terminal_notification(ui: TerminalUI, kind: str, data: dict[str, Any]) -> None:
+    if kind == "model_request":
+        ui.model_request(data["step"])
+    elif kind == "tool_call":
+        ui.tool_call(data["tool"], data.get("arguments", {}), data.get("error"))
+    elif kind == "tool_result":
+        ui.tool_result(data["tool"], data.get("result", {}))
 
 
-def _interactive_approval(name: str, arguments: dict[str, Any]) -> bool:
-    summary = _safe_argument_summary(arguments)
-    print(f"\nApproval required: {name}\n{summary}")
-    answer = input("Execute? [y/N] ").strip().lower()
-    return answer in {"y", "yes"}
-
-
-def _safe_argument_summary(arguments: dict[str, Any]) -> str:
+def _safe_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     safe: dict[str, Any] = {}
     for key, value in arguments.items():
         if key in {"content", "old_text", "new_text"} and isinstance(value, str):
             safe[key] = f"<{len(value)} characters>"
         else:
             safe[key] = value
-    return json.dumps(safe, ensure_ascii=False, indent=2, default=str)[:4000]
+    return safe
 
 
-def _terminal_notification(kind: str, data: dict[str, Any]) -> None:
-    if kind == "model_request":
-        print(f"\n[step {data['step']}] Asking model...", flush=True)
-    elif kind == "tool_call":
-        print(f"  -> {data['tool']}", flush=True)
-    elif kind == "tool_result":
-        status = "ok" if data["ok"] else "failed"
-        print(f"  <- {data['tool']}: {status}", flush=True)
+def _safe_argument_summary(arguments: dict[str, Any]) -> str:
+    """Backward-compatible helper used by tests and external callers."""
+    return json.dumps(_safe_arguments(arguments), ensure_ascii=False, indent=2, default=str)[:4000]
 
 
 def _replace_setting(settings: Settings, **changes: Any) -> Settings:
@@ -153,7 +208,7 @@ def _replace_setting(settings: Settings, **changes: Any) -> Settings:
 def _configure_console_encoding() -> None:
     if os.name != "nt":
         return
-    for stream in (sys.stdout, sys.stderr):
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(encoding="utf-8", errors="replace")

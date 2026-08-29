@@ -10,7 +10,7 @@
 
 ## 状态机
 
-一次任务有四种状态：
+一次用户指令有四种状态，交互 Shell 会在一次指令完成后回到 READY 并保留消息历史：
 
 ```text
 READY -> REQUESTING_MODEL -> EXECUTING_TOOLS -> REQUESTING_MODEL
@@ -19,7 +19,7 @@ READY -> REQUESTING_MODEL -> EXECUTING_TOOLS -> REQUESTING_MODEL
                           \-> MODEL_ERROR
 ```
 
-`CodingAgent.run` 是唯一控制循环。模型只负责提出工具调用，不能直接触碰文件或进程。本地 `ToolRegistry` 是产生副作用的唯一入口。
+`CodingAgent.run` 是唯一控制循环。模型只负责提出工具调用，不能直接触碰文件或进程。本地 `ToolRegistry` 是产生副作用的唯一入口。后续指令通过 `history` 参数复用前一轮完整消息，`/clear` 才会显式建立新上下文。
 
 ## 对话协议不变量
 
@@ -81,8 +81,7 @@ READY -> REQUESTING_MODEL -> EXECUTING_TOOLS -> REQUESTING_MODEL
 - 只直接处理 UTF-8 文本；
 - 字符预算不是精确 token 预算；
 - shell 命令的任意副作用无法完全沙箱化；
-- 当前任务之间不共享对话，只共享用户可查看的事件日志和文件状态；
+- 交互 Shell 在内存中共享本次会话历史，但退出后不持久化对话；
 - 快照适合轻量代码文件，不适合大二进制资产。
 
 这些边界是主动取舍：在考核项目中，明确而诚实的边界比未经验证的复杂功能更容易审计和辩护。
-
