@@ -14,7 +14,8 @@ FYK Coding Agent 直接调用 DeepSeek 的 OpenAI 兼容 Chat Completions 接口
 - 人工审批：默认确认所有写入和命令，`--yes` 可用于无人值守演示；
 - 写前快照与 `:undo` 撤销；
 - JSONL 事件日志和明确的循环终止原因；
-- 零运行时第三方依赖，Python 3.10+ 即可运行。
+- 本地 Web 控制台：实时展示模型轮次、工具调用、命令输出、文件修改和审批请求；
+- Python Agent 核心零第三方运行时依赖，支持 Python 3.10+。
 
 ## 安装
 
@@ -27,9 +28,12 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -e .
 setx DEEPSEEK_API_KEY "你的密钥"
+cd web
+npm install
+cd ..
 ```
 
-设置密钥后请打开一个新终端。macOS/Linux 使用：
+Web 控制台需要 Node.js 22+，`npm install` 只需在首次安装或前端依赖变化后执行。设置密钥后请打开一个新终端。macOS/Linux 使用：
 
 ```bash
 export DEEPSEEK_API_KEY="你的密钥"
@@ -51,6 +55,14 @@ fyk-agent --workspace D:\path\to\project "阅读项目，修复失败的测试�
 ```powershell
 fyk-agent --workspace D:\path\to\project
 ```
+
+启动可视化控制台：
+
+```powershell
+fyk-agent --web --workspace D:\path\to\project
+```
+
+该命令会在浏览器打开 FYK Agent Console。中央时间线实时显示用户指令、模型轮次、工具调用及结果；右侧同步显示工作区文件和修改摘要。写文件、建目录和执行命令仍会弹出审批窗口，可选择本次允许、会话内全部允许或拒绝。控制接口只监听 `127.0.0.1`，并使用启动时生成的随机令牌验证请求。
 
 启动后可以连续输入任务，后续任务会保留本次会话中之前的用户指令、模型回答和工具结果：
 
@@ -84,6 +96,7 @@ fyk-agent --workspace D:\path\to\project
 --model MODEL          临时覆盖模型
 --max-steps N          临时覆盖最大模型轮数
 --no-color             关闭 ANSI 颜色
+--web                  打开本地可视化控制台
 ```
 
 ## 运行机制

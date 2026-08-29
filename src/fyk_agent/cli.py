@@ -27,6 +27,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", help="Override DEEPSEEK_MODEL for this session")
     parser.add_argument("--max-steps", type=int, help="Maximum model steps per user prompt")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI terminal colors")
+    parser.add_argument("--web", action="store_true", help="Open the local visual Agent console")
+    parser.add_argument("--api-port", type=int, default=8765, help=argparse.SUPPRESS)
+    parser.add_argument("--frontend-port", type=int, default=3000, help=argparse.SUPPRESS)
     parser.add_argument("--version", action="version", version=f"FYK Coding Agent {__version__}")
     return parser
 
@@ -73,6 +76,23 @@ def main(argv: list[str] | None = None) -> int:
         max_context_chars=settings.max_context_chars,
         notify=lambda kind, data: _terminal_notification(ui, kind, data),
     )
+    if args.web:
+        if args.task:
+            ui.error("Web mode does not accept a one-shot task; enter it in the browser.")
+            return 2
+        from .web import run_web_console
+
+        try:
+            return run_web_console(
+                settings,
+                workspace,
+                automatic_approval=args.yes,
+                api_port=args.api_port,
+                frontend_port=args.frontend_port,
+            )
+        except (OSError, RuntimeError) as exc:
+            ui.error(f"Web console error: {exc}")
+            return 1
     ui.banner(
         version=__version__,
         model=settings.model,
