@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fyk-coding-agent"
+name = "yukai"
 version = "0.2.0"
-description = "FYK Coding Agent - a small, auditable coding agent built without agent frameworks"
+description = "Yukai - A Lightweight Autonomous Coding Agent"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -13,6 +13,7 @@ authors = [{ name = "Feng Yikang" }]
 dependencies = []
 
 [project.scripts]
+yukai = "fyk_agent.cli:main"
 fyk-agent = "fyk_agent.cli:main"
 
 [tool.setuptools.packages.find]

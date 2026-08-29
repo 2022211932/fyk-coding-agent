@@ -21,7 +21,7 @@ class ChangeJournal:
 
     def __init__(self, workspace: Path):
         self.workspace = workspace.resolve()
-        self.state_dir = self.workspace / ".fyk-agent"
+        self.state_dir = self.workspace / ".yukai"
         self.snapshot_file = self.state_dir / "snapshots.jsonl"
 
     def capture(self, path: Path) -> str:

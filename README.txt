@@ -1,8 +1,8 @@
-FYK Coding Agent
+Yukai — A Lightweight Autonomous Coding Agent
 
 Git仓库：https://github.com/2022211932/fyk-coding-agent
 
-运行要求：Python 3.10+。执行“python -m venv .venv”，激活环境后运行“python -m pip install -e .”。将DeepSeek密钥写入环境变量DEEPSEEK_API_KEY，然后使用“fyk-agent -w 项目目录 "编程任务"”；直接运行“fyk-agent -w 项目目录”进入类似Claude Code的常驻命令行。可视化模式另需Node.js 22+，首次执行“cd web; npm install; cd ..”，以后运行“fyk-agent --web”。点击顶部工作区路径可浏览本机并选择项目，程序会记住最近项目。
+运行要求：Python 3.10+。执行“python -m venv .venv”，激活环境后运行“python -m pip install -e .”。将DeepSeek密钥写入环境变量DEEPSEEK_API_KEY，然后使用“yukai -w 项目目录 "编程任务"”；直接运行“yukai -w 项目目录”进入类似Claude Code的常驻命令行。可视化模式另需Node.js 22+，首次执行“cd web; npm install; cd ..”，以后运行“yukai --web”。点击顶部工作区路径可浏览本机并选择项目，程序会记住最近项目。旧命令“fyk-agent”仍可兼容使用。
 
 本项目直接调用DeepSeek V4 Pro的OpenAI兼容tool calling接口，不使用任何Agent框架或服务端文件、代码执行工具。自行实现模型HTTP客户端、对话历史、上下文裁剪、工具协议解析、Agent循环、终止条件、错误重试和本地执行。
 

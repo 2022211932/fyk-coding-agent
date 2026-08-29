@@ -8,7 +8,7 @@ from typing import Any
 
 class EventLog:
     def __init__(self, workspace: Path):
-        self.path = workspace / ".fyk-agent" / "events.jsonl"
+        self.path = workspace / ".yukai" / "events.jsonl"
 
     def emit(self, kind: str, **data: Any) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

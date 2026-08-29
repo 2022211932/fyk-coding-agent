@@ -1,8 +1,11 @@
-# FYK Coding Agent
+> **Yukai**\
+> &#x20;*A Lightweight Autonomous Coding Agent*
 
 由冯逸康独立设计与实现的本地编程智能体，用于南京大学软件学院推免考核。
 
-FYK Coding Agent 直接调用 DeepSeek 的 OpenAI 兼容 Chat Completions 接口，不使用任何 Agent 框架或服务端代码执行工具。对话历史、上下文裁剪、工具定义与执行、循环控制、审批、错误处理、审计和撤销都由本项目实现。
+<p align="center"><img src="web/public/og.png" width="760" alt="Yukai — A Lightweight Autonomous Coding Agent"></p>
+
+Yukai 直接调用 DeepSeek 的 OpenAI 兼容 Chat Completions 接口，不使用任何 Agent 框架或服务端代码执行工具。对话历史、上下文裁剪、工具定义与执行、循环控制、审批、错误处理、审计和撤销都由本项目实现。
 
 ## 主要能力
 
@@ -47,29 +50,29 @@ python -m pip install -e .
 直接执行单个任务：
 
 ```powershell
-fyk-agent --workspace D:\path\to\project "阅读项目，修复失败的测试并验证"
+yukai --workspace D:\path\to\project "阅读项目，修复失败的测试并验证"
 ```
 
 进入类似 Claude Code 的常驻交互模式：
 
 ```powershell
-fyk-agent --workspace D:\path\to\project
+yukai --workspace D:\path\to\project
 ```
 
 启动可视化控制台：
 
 ```powershell
-fyk-agent --web
+yukai --web
 ```
 
-该命令会在浏览器打开 FYK Agent Console。点击顶部工作区路径，可以从最近项目或“此电脑”浏览并选择本机项目；选择结果会被记住，下次执行 `fyk-agent --web` 时自动恢复，无需重复填写 `--workspace`。首次启动默认使用当前目录，也仍可用 `--workspace` 指定初始项目。
+该命令会在浏览器打开 Yukai Console。点击顶部工作区路径，可以从最近项目或“此电脑”浏览并选择本机项目；选择结果会被记住，下次执行 `yukai --web` 时自动恢复，无需重复填写 `--workspace`。首次启动默认使用当前目录，也仍可用 `--workspace` 指定初始项目。
 
 中央时间线实时显示用户指令、模型轮次、工具调用及结果；右侧同步显示工作区文件和修改摘要。输入框右侧的审批开关可在手动审批与自动审批之间切换。手动模式下，写文件、建目录和执行命令会弹出审批窗口；自动模式只应在可信项目中开启。控制接口只监听 `127.0.0.1`，并使用启动时生成的随机令牌验证请求。
 
 启动后可以连续输入任务，后续任务会保留本次会话中之前的用户指令、模型回答和工具结果：
 
 ```text
-╭─ FYK Coding Agent 0.2.0 ──────────────────────────────────────────────╮
+╭─ Yukai 0.2.0 ─────────────────────────────────────────────────────────╮
 │  Model      deepseek-v4-pro
 │  Workspace  D:\path\to\project
 │  Safety     ask before changes
@@ -133,17 +136,17 @@ fyk-agent --web
 
 ## 本地状态
 
-运行后工作区会产生未入库目录 `.fyk-agent/`：
+运行后工作区会产生未入库目录 `.yukai/`：
 
 ```text
-.fyk-agent/
+.yukai/
 ├── events.jsonl      # 模型轮次、工具结果、耗时与终止原因
 └── snapshots.jsonl   # 文件写入前快照，供 :undo 使用
 ```
 
 事件日志不记录 API Key；审批界面对大段文件内容只显示字符数。
 
-Web 控制台的最近项目列表保存在当前用户的本机配置目录：Windows 为 `%LOCALAPPDATA%\fyk-coding-agent\settings.json`，macOS/Linux 为 `$XDG_CONFIG_HOME/fyk-coding-agent/settings.json`（未设置时使用 `~/.config`）。其中只包含最近工作区路径，不包含 API Key。
+Web 控制台的最近项目列表保存在当前用户的本机配置目录：Windows 为 `%LOCALAPPDATA%\yukai\settings.json`，macOS/Linux 为 `$XDG_CONFIG_HOME/yukai/settings.json`（未设置时使用 `~/.config`）。其中只包含最近工作区路径，不包含 API Key。
 
 ## 测试
 
@@ -160,7 +163,7 @@ python -m unittest discover -s tests -v
 
 ```powershell
 python scripts/prepare_demo.py
-fyk-agent -y -w demo-workspace "修复 slugify，使全部测试通过；不要修改测试，并在结束前运行完整测试。"
+yukai -y -w demo-workspace "修复 slugify，使全部测试通过；不要修改测试，并在结束前运行完整测试。"
 ```
 
 模板初始包含多个失败测试，可以展示 Agent 阅读文件、执行测试、定位问题、修改实现和回归验证的完整闭环。重复演示时删除 `demo-workspace` 后重新运行准备脚本即可。
@@ -173,6 +176,8 @@ fyk-agent -y -w demo-workspace "修复 slugify，使全部测试通过；不要�
 - 撤销针对 Agent 文件工具的最近写入，不尝试回滚命令产生的任意副作用。
 
 DeepSeek 接口参数依据其[官方 Function Calling 文档](https://api-docs.deepseek.com/guides/function_calling/)和[模型说明](https://api-docs.deepseek.com/quick_start/pricing/)实现。
+
+旧命令 `fyk-agent` 作为兼容入口继续保留，其功能与 `yukai` 完全一致。
 
 ## 作者
 

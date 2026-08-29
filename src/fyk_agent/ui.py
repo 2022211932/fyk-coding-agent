@@ -45,7 +45,7 @@ class TerminalUI:
         automatic_approval: bool,
     ) -> None:
         width = 72
-        title = f" FYK Coding Agent {version} "
+        title = f" Yukai {version} "
         top = "╭─" + title + "─" * max(0, width - len(title) - 2) + "╮"
         approval = "auto-approve" if automatic_approval else "ask before changes"
         self.write(self.paint(top, CYAN))
@@ -105,7 +105,7 @@ class TerminalUI:
 /history    Show user prompts in the current conversation
 /clear      Start a fresh conversation (files are unchanged)
 /undo       Restore the file before the latest write/edit
-/exit       Exit FYK Coding Agent
+/exit       Exit Yukai
 
 End a line with \\ to continue entering a multi-line prompt.
 Plain text is sent to the agent as the next instruction.
@@ -183,4 +183,3 @@ def _result_detail(name: str, result: dict[str, Any]) -> str:
 def _one_line(value: str, limit: int) -> str:
     value = " ".join(value.split())
     return value if len(value) <= limit else value[: limit - 1] + "…"
-

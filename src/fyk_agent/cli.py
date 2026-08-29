@@ -18,8 +18,8 @@ from .workspace import Workspace, WorkspaceError
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="fyk-agent",
-        description="FYK Coding Agent - an interactive coding agent powered by DeepSeek",
+        prog="yukai",
+        description="Yukai - a lightweight autonomous coding agent powered by DeepSeek",
     )
     parser.add_argument("task", nargs="*", help="Programming task; omit to open the coding shell")
     parser.add_argument(
@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--web", action="store_true", help="Open the local visual Agent console")
     parser.add_argument("--api-port", type=int, default=8765, help=argparse.SUPPRESS)
     parser.add_argument("--frontend-port", type=int, default=3000, help=argparse.SUPPRESS)
-    parser.add_argument("--version", action="version", version=f"FYK Coding Agent {__version__}")
+    parser.add_argument("--version", action="version", version=f"Yukai {__version__}")
     return parser
 
 

@@ -10,7 +10,7 @@ from .events import EventLog
 from .tools import ToolRegistry
 
 
-SYSTEM_PROMPT = """You are FYK Coding Agent, an autonomous programming assistant operating in a local workspace.
+SYSTEM_PROMPT = """You are Yukai, an autonomous programming assistant operating in a local workspace.
 
 Work method:
 1. Inspect the repository before making assumptions.

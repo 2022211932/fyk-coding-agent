@@ -219,7 +219,7 @@ def run_web_console(
         frontend_url = f"http://localhost:{frontend_port}/?{query}"
         if open_browser:
             webbrowser.open(frontend_url)
-        print(f"FYK Agent Console: http://localhost:{frontend_port}/")
+        print(f"Yukai Console: http://localhost:{frontend_port}/")
         print(f"Workspace: {workspace.root}")
         print("Press Ctrl+C to stop the web console.")
         server.serve_forever(poll_interval=0.25)
@@ -236,7 +236,7 @@ def run_web_console(
 
 def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "FYKAgentWeb/0.2"
+        server_version = "YukaiWeb/0.2"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return
@@ -247,7 +247,7 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                 return
             self.send_response(204)
             self._cors_headers()
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-FYK-Token")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Yukai-Token")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.end_headers()
 
@@ -398,7 +398,7 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                 self.close_connection = True
 
         def _authorized(self) -> bool:
-            if not self._origin_allowed() or self.headers.get("X-FYK-Token") != state.token:
+            if not self._origin_allowed() or self.headers.get("X-Yukai-Token") != state.token:
                 self._json(403, {"ok": False, "error": "Forbidden"}, include_cors=False)
                 return False
             return True
@@ -463,18 +463,28 @@ def _safe_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _default_config_path() -> Path:
+    return _settings_base_directory() / "yukai" / "settings.json"
+
+
+def _settings_base_directory() -> Path:
     if os.name == "nt" and os.getenv("LOCALAPPDATA"):
-        base = Path(os.environ["LOCALAPPDATA"])
-    else:
-        base = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return base / "fyk-coding-agent" / "settings.json"
+        return Path(os.environ["LOCALAPPDATA"])
+    return Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
 
 
 def load_recent_workspaces(config_path: Path | None = None) -> list[Path]:
-    target = config_path or _default_config_path()
-    try:
-        payload = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
+    targets = [config_path] if config_path else [
+        _default_config_path(),
+        _settings_base_directory() / "fyk-coding-agent" / "settings.json",
+    ]
+    payload: Any = None
+    for target in targets:
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+            break
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+    if payload is None:
         return []
     raw_paths = payload.get("recent_workspaces", []) if isinstance(payload, dict) else []
     recent: list[Path] = []

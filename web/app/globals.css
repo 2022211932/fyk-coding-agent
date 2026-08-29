@@ -26,8 +26,8 @@ button { color: inherit; }
 .topbar { height: 62px; display: grid; grid-template-columns: 260px 1fr 300px; align-items: center; border-bottom: 1px solid var(--line); background: rgba(9, 13, 18, .9); backdrop-filter: blur(16px); padding: 0 22px; position: sticky; top: 0; z-index: 20; }
 .brand { display: flex; align-items: center; gap: 9px; letter-spacing: -.02em; font-size: 15px; }
 .brand b { color: var(--muted); font-weight: 500; }
-.brand-mark { width: 25px; height: 25px; display: grid; place-items: center; border: 1px solid rgba(100,230,194,.35); border-radius: 7px; background: var(--mint-soft); transform: rotate(45deg); }
-.brand-mark i { width: 7px; height: 7px; border-radius: 2px; background: var(--mint); box-shadow: 0 0 16px var(--mint); }
+.brand-mark { width: 28px; height: 28px; flex: 0 0 auto; display: block; overflow: hidden; border: 1px solid rgba(122,185,255,.35); border-radius: 8px; background-color: #fff; background-image: url('/yukai-logo.png'); background-repeat: no-repeat; background-size: 118px 118px; background-position: -17px -46px; box-shadow: 0 0 18px rgba(35,158,225,.12); }
+.brand-mark i { display: none; }
 .version { color: var(--faint); font: 10px ui-monospace, monospace; margin-left: 3px; }
 .workspace-pill { justify-self: center; max-width: min(52vw, 620px); display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: #0d1319; color: #a9b4bd; border-radius: 8px; padding: 8px 12px; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; cursor: pointer; transition: .18s ease; }
 .workspace-pill:hover:not(:disabled) { border-color: rgba(100,230,194,.42); color: #d4e3df; background: #101920; }
@@ -139,7 +139,7 @@ kbd { font: 7px ui-monospace, monospace; border: 1px solid #2b3640; border-botto
 .queue-toast span { display: inline-block; width: 6px; height: 6px; background: var(--mint); border-radius: 50%; margin-right: 6px; }
 .connection-banner { border: 1px solid rgba(255,120,109,.25); background: rgba(255,120,109,.07); color: #e9a39d; border-radius: 9px; padding: 10px 13px; margin: 0 0 18px; font-size: 10px; line-height: 1.6; }
 .empty-state { min-height: 420px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--muted); }
-.empty-state .brand-mark { width: 42px; height: 42px; margin-bottom: 20px; }
+.empty-state .brand-mark { width: 42px; height: 42px; margin-bottom: 20px; background-size: 185px 185px; background-position: -27px -72px; }
 .empty-state h2 { color: var(--text); font-size: 18px; margin: 4px 0 8px; }
 .empty-state > p:not(.eyebrow) { max-width: 430px; font-size: 10px; line-height: 1.7; }
 .empty-state > div { display: flex; gap: 8px; margin-top: 15px; }

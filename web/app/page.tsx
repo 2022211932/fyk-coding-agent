@@ -67,16 +67,16 @@ export default function Home() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const api = params.get('api') || window.sessionStorage.getItem('fyk-api');
-    const token = params.get('token') || window.sessionStorage.getItem('fyk-token');
+    const api = params.get('api') || window.sessionStorage.getItem('yukai-api') || window.sessionStorage.getItem('fyk-api');
+    const token = params.get('token') || window.sessionStorage.getItem('yukai-token') || window.sessionStorage.getItem('fyk-token');
     if (!api || !token) return;
-    window.sessionStorage.setItem('fyk-api', api);
-    window.sessionStorage.setItem('fyk-token', token);
+    window.sessionStorage.setItem('yukai-api', api);
+    window.sessionStorage.setItem('yukai-token', token);
     window.history.replaceState({}, '', window.location.pathname);
     connection.current = { api, token };
     const connect = async () => {
       try {
-        const headers = { 'X-FYK-Token': token };
+        const headers = { 'X-Yukai-Token': token };
         const response = await fetch(`${api}/api/status`, { headers });
         if (!response.ok) throw new Error(`连接失败 (${response.status})`);
         setStatus(await response.json());
@@ -97,7 +97,7 @@ export default function Home() {
   async function refreshFiles() {
     const { api, token } = connection.current;
     if (!api) return;
-    const response = await fetch(`${api}/api/files?path=.`, { headers: { 'X-FYK-Token': token } });
+    const response = await fetch(`${api}/api/files?path=.`, { headers: { 'X-Yukai-Token': token } });
     const data = await response.json();
     if (data.ok) setFiles(data.entries || []);
   }
@@ -108,7 +108,7 @@ export default function Home() {
     try {
       const response = await fetch(`${api}/api/settings`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-FYK-Token': token },
+        headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
         body: JSON.stringify({ automatic_approval: !status.automatic_approval }),
       });
       const data = await response.json();
@@ -125,7 +125,7 @@ export default function Home() {
     setPickerError('');
     try {
       const response = await fetch(`${api}/api/directories${query}`, {
-        headers: { 'X-FYK-Token': token },
+        headers: { 'X-Yukai-Token': token },
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || '无法读取目录');
@@ -142,7 +142,7 @@ export default function Home() {
     const { api, token } = connection.current;
     try {
       const response = await fetch(`${api}/api/projects`, {
-        headers: { 'X-FYK-Token': token },
+        headers: { 'X-Yukai-Token': token },
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || '无法加载本地项目');
@@ -161,7 +161,7 @@ export default function Home() {
     try {
       const response = await fetch(`${api}/api/workspace`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-FYK-Token': token },
+        headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
         body: JSON.stringify({ path }),
       });
       const data = await response.json();
@@ -184,7 +184,7 @@ export default function Home() {
     if (!message || running) return;
     if (!live) {
       setPrompt('');
-      setConnectionError('请使用 fyk-agent --web 启动实时控制台。当前页面为交互演示。');
+      setConnectionError('请使用 yukai --web 启动实时控制台。当前页面为交互演示。');
       return;
     }
     setPrompt('');
@@ -195,7 +195,7 @@ export default function Home() {
     try {
       const response = await fetch(`${api}/api/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-FYK-Token': token },
+        headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
         body: JSON.stringify({ message, session_id: sessionId }),
       });
       if (!response.ok || !response.body) {
@@ -233,7 +233,7 @@ export default function Home() {
     const { api, token } = connection.current;
     await fetch(`${api}/api/approvals/${approval.approval_id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-FYK-Token': token },
+      headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
       body: JSON.stringify({ decision }),
     });
     setEvents((previous) => [...previous, { type: 'approval_decision', message: decision, timestamp: now() }]);
@@ -246,7 +246,7 @@ export default function Home() {
     const { api, token } = connection.current;
     await fetch(`${api}/api/clear`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-FYK-Token': token },
+      headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
       body: JSON.stringify({ session_id: sessionId }),
     });
     setEvents([]);
@@ -257,7 +257,7 @@ export default function Home() {
     const { api, token } = connection.current;
     const response = await fetch(`${api}/api/undo`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-FYK-Token': token },
+      headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
       body: '{}',
     });
     const result = await response.json();
@@ -280,7 +280,7 @@ export default function Home() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>FYK <b>Agent</b></span><span className="version">v{status?.version || '0.2'}</span></div>
+        <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>Yukai</span><span className="version">v{status?.version || '0.2'}</span></div>
         <button className="workspace-pill" type="button" onClick={openProjectPicker} disabled={!live || running} title="选择本地主机上的项目"><span className={`status-dot ${connectionError ? 'offline' : ''}`} /><span className="workspace-path">{live ? compact(status.workspace, 52) : 'Demo · demo-workspace'}</span><span className="workspace-chevron">⌄</span></button>
         <div className="top-actions"><button className="icon-button" aria-label="撤销最近修改" onClick={undo}>↶</button><div className="model-chip"><span>◆</span> {status?.model || 'DeepSeek V4 Pro'}</div></div>
       </header>
@@ -309,14 +309,14 @@ export default function Home() {
             {connectionError && <div className="connection-banner">{connectionError}</div>}
             {live ? <LiveTimeline events={events} running={running} /> : <DemoTimeline />}
             {live && events.length === 0 && (
-              <div className="empty-state"><span className="brand-mark"><i /></span><p className="eyebrow">READY</p><h2>把编程任务交给 FYK Agent</h2><p>你将实时看到模型思考、工具调用、命令输出、文件变更与审批请求。</p><div><button onClick={() => setPrompt('阅读项目结构，告诉我应该从哪里开始。')}>了解项目</button><button onClick={() => setPrompt('运行测试，定位失败原因并提出修复方案。')}>检查测试</button></div></div>
+              <div className="empty-state"><span className="brand-mark"><i /></span><p className="eyebrow">READY</p><h2>把编程任务交给 Yukai</h2><p>你将实时看到模型思考、工具调用、命令输出、文件变更与审批请求。</p><div><button onClick={() => setPrompt('阅读项目结构，告诉我应该从哪里开始。')}>了解项目</button><button onClick={() => setPrompt('运行测试，定位失败原因并提出修复方案。')}>检查测试</button></div></div>
             )}
             <div ref={timelineEnd} />
           </div>
 
           <form className="composer" onSubmit={submit}>
             {running && <div className="queue-toast"><span />Agent 正在执行任务</div>}
-            <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={live ? '继续交给 FYK Agent 一个任务…' : '输入任务体验交互效果…'} aria-label="输入任务" rows={2} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
+            <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={live ? '继续交给 Yukai 一个任务…' : '输入任务体验交互效果…'} aria-label="输入任务" rows={2} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
             <div className="composer-foot"><div><button type="button" className="mini-button">＋</button><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span></div><div><button type="button" className={`approval-switch ${status?.automatic_approval ? 'enabled' : ''}`} role="switch" aria-checked={Boolean(status?.automatic_approval)} onClick={toggleAutomaticApproval} disabled={!live || running} title="开启后，写文件和运行命令将不再逐次询问"><span><i /></span>{status?.automatic_approval ? '自动审批' : '手动审批'}</button><button className="send" type="submit" disabled={!prompt.trim() || running}>{running ? '执行中…' : '运行任务'} <span>↵</span></button></div></div>
           </form>
         </section>
@@ -347,7 +347,7 @@ function LiveTimeline({ events, running }: { events: AgentEvent[]; running: bool
     if (event.type === 'tool_result') return <ToolResult event={event} key={index} />;
     if (event.type === 'approval_required') return <div className="live-activity approval-row" key={index}><span className="activity-icon">!</span><div><b>等待操作审批</b><small>{toolLabel(event)}</small></div><span className="exit-badge">REVIEW</span></div>;
     if (event.type === 'approval_decision') return <div className="notice-row" key={index}>审批结果：{event.message}</div>;
-    if (event.type === 'final') return <article className="agent-turn live-answer" key={index}><div className="avatar agent-avatar"><span>◆</span></div><div className="turn-body"><div className="turn-meta"><b>FYK Agent</b><span className="thinking-label">任务完成</span><time>{event.timestamp}</time></div><div className="answer-card"><div className="answer-title"><span>✓</span><b>{event.stop_reason === 'completed' ? '完成' : '已停止'}</b><small>{event.steps} 个模型步骤</small></div><p className="answer-text">{event.text}</p></div></div></article>;
+    if (event.type === 'final') return <article className="agent-turn live-answer" key={index}><div className="avatar agent-avatar"><span>Y</span></div><div className="turn-body"><div className="turn-meta"><b>Yukai</b><span className="thinking-label">任务完成</span><time>{event.timestamp}</time></div><div className="answer-card"><div className="answer-title"><span>✓</span><b>{event.stop_reason === 'completed' ? '完成' : '已停止'}</b><small>{event.steps} 个模型步骤</small></div><p className="answer-text">{event.text}</p></div></div></article>;
     if (event.type === 'notice') return <div className="notice-row success" key={index}>{event.message}</div>;
     if (event.type === 'error') return <div className="connection-banner" key={index}>{event.error}</div>;
     return null;
@@ -412,7 +412,7 @@ function ProjectPicker({ projects, directory, error, switching, onBrowse, onSele
               )) : <div className="picker-empty">{directory ? '该目录中没有子文件夹' : '正在读取本地目录…'}</div>}
             </div>
             <footer>
-              <span>以后直接运行 <code>fyk-agent --web</code> 将自动打开最近项目</span>
+              <span>以后直接运行 <code>yukai --web</code> 将自动打开最近项目</span>
               <button className="select-folder" type="button" onClick={() => directory?.current && onSelect(directory.current)} disabled={!directory?.current || switching}>{switching ? '正在切换…' : '选择当前文件夹'}</button>
             </footer>
           </section>
@@ -423,7 +423,10 @@ function ProjectPicker({ projects, directory, error, switching, onBrowse, onSele
 }
 
 function DemoTimeline() {
-  return <><article className="user-turn"><div className="avatar user-avatar">FY</div><div className="turn-body"><div className="turn-meta"><b>你</b><time>15:42:08</time></div><p>修复 slugify，使全部测试通过；不要修改测试，并在结束前运行完整测试。</p></div></article><article className="agent-turn"><div className="avatar agent-avatar"><span>◆</span></div><div className="turn-body"><div className="turn-meta"><b>FYK Agent</b><span className="thinking-label">思考与执行</span><time>15:42:09</time></div><div className="activity-stack"><DemoActivity icon="⌕" title="浏览工作区" detail="发现 3 个文件" meta="84ms" /><DemoActivity icon="≡" title="读取 3 个文件" detail="README.md · slugify.py · test_slugify.py" meta="12ms" /><DemoActivity icon="›_" title="运行测试" detail="python -m unittest -v" meta="EXIT 1" warning /></div><div className="terminal-card"><div className="terminal-bar"><span /><span /><span /><b>TEST OUTPUT</b><button>复制</button></div><pre><span className="muted">Ran 5 tests in 0.006s</span>{'\n'}<span className="error">FAILED (failures=4)</span>{'\n'}<span className="muted">AssertionError: &apos;hello,-world!&apos; != &apos;hello-world&apos;</span></pre></div><div className="activity-stack second"><DemoActivity icon="±" title="编辑 slugify.py" detail="+12 −1 · 已创建恢复点" meta="M" /><DemoActivity icon="›_" title="重新运行测试" detail="5 passed · 0 failed" meta="PASS" /></div><div className="answer-card"><div className="answer-title"><span>✓</span><b>任务完成</b><small>6 个模型步骤</small></div><p>已修复 <code>slugify.py</code>：加入 Unicode 规范化，过滤标点并合并分隔符；空结果会抛出明确异常。测试文件未修改。</p><div className="verification"><span>✓</span><b>验证通过</b><code>Ran 5 tests · OK</code></div></div></div></article></>;
+  return <>
+    <article className="user-turn"><div className="avatar user-avatar">FY</div><div className="turn-body"><div className="turn-meta"><b>你</b><time>15:42:08</time></div><p>修复 slugify，使全部测试通过；不要修改测试，并在结束前运行完整测试。</p></div></article>
+    <article className="agent-turn"><div className="avatar agent-avatar"><span>Y</span></div><div className="turn-body"><div className="turn-meta"><b>Yukai</b><span className="thinking-label">思考与执行</span><time>15:42:09</time></div><div className="activity-stack"><DemoActivity icon="⌕" title="浏览工作区" detail="发现 3 个文件" meta="84ms" /><DemoActivity icon="≡" title="读取 3 个文件" detail="README.md · slugify.py · test_slugify.py" meta="12ms" /><DemoActivity icon="›_" title="运行测试" detail="python -m unittest -v" meta="EXIT 1" warning /></div><div className="terminal-card"><div className="terminal-bar"><span /><span /><span /><b>TEST OUTPUT</b><button>复制</button></div><pre><span className="muted">Ran 5 tests in 0.006s</span>{'\n'}<span className="error">FAILED (failures=4)</span>{'\n'}<span className="muted">AssertionError: &apos;hello,-world!&apos; != &apos;hello-world&apos;</span></pre></div><div className="activity-stack second"><DemoActivity icon="±" title="编辑 slugify.py" detail="+12 −1 · 已创建恢复点" meta="M" /><DemoActivity icon="›_" title="重新运行测试" detail="5 passed · 0 failed" meta="PASS" /></div><div className="answer-card"><div className="answer-title"><span>✓</span><b>任务完成</b><small>6 个模型步骤</small></div><p>已修复 <code>slugify.py</code>：加入 Unicode 规范化，过滤标点并合并分隔符；空结果会抛出明确异常。测试文件未修改。</p><div className="verification"><span>✓</span><b>验证通过</b><code>Ran 5 tests · OK</code></div></div></div></article>
+  </>;
 }
 
 function DemoActivity({ icon, title, detail, meta, warning = false }: { icon: string; title: string; detail: string; meta: string; warning?: boolean }) {

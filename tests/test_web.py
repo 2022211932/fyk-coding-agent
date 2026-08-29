@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -48,7 +49,7 @@ class WebConsoleTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def request(self, path: str, *, token: str = "test-token", origin: str | None = None):
-        headers = {"X-FYK-Token": token}
+        headers = {"X-Yukai-Token": token}
         if origin:
             headers["Origin"] = origin
         return urlopen(Request(self.base_url + path, headers=headers), timeout=2)
@@ -57,7 +58,7 @@ class WebConsoleTests(unittest.TestCase):
         request = Request(
             self.base_url + path,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json", "X-FYK-Token": token},
+            headers={"Content-Type": "application/json", "X-Yukai-Token": token},
             method="POST",
         )
         return urlopen(request, timeout=2)
@@ -128,6 +129,16 @@ class WebConsoleTests(unittest.TestCase):
             self.post("/api/workspace", {"path": str(other)})
         self.assertEqual(error.exception.code, 409)
         self.assertEqual(self.state.workspace.root, self.root.resolve())
+
+    def test_legacy_recent_project_is_migrated_on_next_start(self) -> None:
+        legacy = self.root / "fyk-coding-agent" / "settings.json"
+        legacy.parent.mkdir()
+        legacy.write_text(
+            json.dumps({"recent_workspaces": [str(self.root)]}),
+            encoding="utf-8",
+        )
+        with patch("fyk_agent.web._settings_base_directory", return_value=self.root):
+            self.assertEqual(load_last_workspace(), self.root.resolve())
 
     def test_sensitive_edit_bodies_are_hidden_from_events(self) -> None:
         arguments = _safe_arguments({"path": "main.py", "content": "secret\nbody"})

@@ -32,7 +32,7 @@ class TerminalUITests(unittest.TestCase):
         )
         self.ui.history(history)
         rendered = self.output.getvalue()
-        self.assertIn("FYK Coding Agent 0.2.0", rendered)
+        self.assertIn("Yukai 0.2.0", rendered)
         self.assertIn("1 user turn(s), 3 message(s)", rendered)
         self.assertIn("inspect the project", rendered)
         self.assertNotIn("\033[", rendered)

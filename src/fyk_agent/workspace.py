@@ -15,7 +15,7 @@ _PRIVATE_NAMES = {
     "credentials.json",
     "service-account.json",
 }
-_INTERNAL_PARTS = {".git", ".fyk-agent"}
+_INTERNAL_PARTS = {".git", ".yukai", ".fyk-agent"}
 
 
 @dataclass(frozen=True)
@@ -68,4 +68,3 @@ class Workspace:
 def _is_private_name(name: str) -> bool:
     lowered = name.lower()
     return lowered in _PRIVATE_NAMES or lowered.startswith(".env.") or lowered.endswith(".pem")
-

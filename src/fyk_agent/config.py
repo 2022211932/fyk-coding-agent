@@ -43,18 +43,24 @@ class Settings:
             api_key=api_key,
             base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/"),
             model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"),
-            max_steps=_positive_int("FYK_AGENT_MAX_STEPS", 30),
-            max_context_chars=_positive_int("FYK_AGENT_MAX_CONTEXT_CHARS", 800_000),
-            request_timeout=_positive_int("FYK_AGENT_REQUEST_TIMEOUT", 120),
-            max_retries=_positive_int("FYK_AGENT_MAX_RETRIES", 3),
+            max_steps=_positive_int("YUKAI_MAX_STEPS", 30, "FYK_AGENT_MAX_STEPS"),
+            max_context_chars=_positive_int(
+                "YUKAI_MAX_CONTEXT_CHARS", 800_000, "FYK_AGENT_MAX_CONTEXT_CHARS"
+            ),
+            request_timeout=_positive_int(
+                "YUKAI_REQUEST_TIMEOUT", 120, "FYK_AGENT_REQUEST_TIMEOUT"
+            ),
+            max_retries=_positive_int("YUKAI_MAX_RETRIES", 3, "FYK_AGENT_MAX_RETRIES"),
             reasoning_effort=_choice(
                 "DEEPSEEK_REASONING_EFFORT", "high", {"low", "high", "max"}
             ),
         )
 
 
-def _positive_int(name: str, default: int) -> int:
+def _positive_int(name: str, default: int, legacy_name: str | None = None) -> int:
     raw = os.getenv(name)
+    if raw is None and legacy_name:
+        raw = os.getenv(legacy_name)
     if raw is None:
         return default
     value = int(raw)

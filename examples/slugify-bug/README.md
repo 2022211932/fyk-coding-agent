@@ -1,6 +1,6 @@
 # Slugify Demo Task
 
-This deliberately incomplete project is the input for a FYK Coding Agent demo.
+This deliberately incomplete project is the input for a Yukai demo.
 
 Task:
 
@@ -11,4 +11,3 @@ Run the initial failing tests with:
 ```text
 python -m unittest -v
 ```
-

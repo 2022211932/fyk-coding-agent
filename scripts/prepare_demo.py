@@ -6,7 +6,7 @@ import shutil
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Prepare a clean FYK Coding Agent demo workspace")
+    parser = argparse.ArgumentParser(description="Prepare a clean Yukai demo workspace")
     parser.add_argument("destination", nargs="?", default="demo-workspace")
     args = parser.parse_args()
 
@@ -26,4 +26,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

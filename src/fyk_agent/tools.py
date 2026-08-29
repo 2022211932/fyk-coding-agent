@@ -202,7 +202,9 @@ class ToolRegistry:
         entries: list[dict[str, Any]] = []
         for current, directories, files in os.walk(base):
             directories[:] = sorted(
-                name for name in directories if name not in {".git", ".fyk-agent", "__pycache__"}
+                name
+                for name in directories
+                if name not in {".git", ".yukai", ".fyk-agent", "__pycache__"}
             )
             for name, kind in [(item, "directory") for item in directories] + [
                 (item, "file") for item in sorted(files)
@@ -268,7 +270,10 @@ class ToolRegistry:
                 self.workspace.resolve(relative, must_exist=True)
             except (ValueError, WorkspaceError, OSError):
                 continue
-            if any(part in {".git", ".fyk-agent", "__pycache__"} for part in candidate.parts):
+            if any(
+                part in {".git", ".yukai", ".fyk-agent", "__pycache__"}
+                for part in candidate.parts
+            ):
                 continue
             try:
                 if candidate.stat().st_size > MAX_SEARCH_FILE_BYTES:

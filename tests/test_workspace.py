@@ -27,7 +27,14 @@ class WorkspaceTests(unittest.TestCase):
             self.workspace.resolve(str(self.root / "file.txt"))
 
     def test_rejects_credentials_and_internal_paths(self) -> None:
-        for value in [".env", ".env.local", "keys/private.pem", ".git/config", ".fyk-agent/events.jsonl"]:
+        for value in [
+            ".env",
+            ".env.local",
+            "keys/private.pem",
+            ".git/config",
+            ".yukai/events.jsonl",
+            ".fyk-agent/events.jsonl",
+        ]:
             with self.subTest(value=value), self.assertRaises(WorkspaceError):
                 self.workspace.resolve(value)
 
@@ -49,4 +56,3 @@ class WorkspaceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
