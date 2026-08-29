@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fyk-coding-agent"
+version = "0.1.0"
+description = "FYK Coding Agent - a small, auditable coding agent built without agent frameworks"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Feng Yikang" }]
+dependencies = []
+
+[project.scripts]
+fyk-agent = "fyk_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
