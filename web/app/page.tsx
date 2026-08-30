@@ -22,7 +22,13 @@ type AgentEvent = {
   message_count?: number;
   context_compactions?: number;
   max_context_chars?: number;
+  plan?: TaskPlan;
+  unfinished?: string[];
 };
+
+type PlanEvidence = { id: string; tool: string; ok: boolean; summary: string; step: number; verification: boolean };
+type PlanStep = { id: string; title: string; kind: 'inspect' | 'change' | 'verify' | 'other'; status: 'pending' | 'in_progress' | 'completed' | 'blocked'; evidence_ids: string[]; note: string };
+type TaskPlan = { summary: string; steps: PlanStep[]; completed: number; total: number; terminal: boolean; blocked: boolean; evidence: PlanEvidence[] };
 
 type Status = {
   version: string;
@@ -97,6 +103,8 @@ export default function Home() {
   const recentSessions = orderedSessions.filter((session) => !session.archived);
   const archivedSessions = orderedSessions.filter((session) => session.archived);
   const contextPercent = status ? Math.min(100, (activeSession.contextChars / status.max_context_chars) * 100) : 24;
+  const latestPlanEvent = [...events].reverse().find((event) => ['plan_updated', 'plan_reset'].includes(event.type));
+  const activePlan = latestPlanEvent?.type === 'plan_updated' ? latestPlanEvent.plan : undefined;
 
   function updateSession(targetId: string, update: (session: ConversationSession) => ConversationSession) {
     setConversationStore((previous) => ({
@@ -593,6 +601,7 @@ export default function Home() {
         </section>
 
         <aside className="inspector">
+          {live && activePlan && <PlanPanel plan={activePlan} />}
           <section className="inspector-section context-section">
             <div className="panel-heading"><span>会话上下文</span><b>{live ? `${contextPercent.toFixed(contextPercent < 1 ? 1 : 0)}%` : '24%'}</b></div><div className="meter"><i style={{ width: `${live ? contextPercent : 24}%` }} /></div><div className="meter-label"><span>{live ? `${activeSession.messageCount} 条消息` : '12 条消息'}</span><span>{live ? `${formatChars(activeSession.contextChars)} / ${formatChars(status?.max_context_chars || 0)}` : '192k / 800k chars'}</span></div>
             {live && activeSession.contextCompactions > 0 && <div className="context-note">已自动压缩 {activeSession.contextCompactions} 次上下文</div>}
@@ -649,7 +658,11 @@ function LiveTimeline({ events, running }: { events: AgentEvent[]; running: bool
     if (event.type === 'tool_result') return <ToolResult event={event} key={index} />;
     if (event.type === 'approval_required') return <div className="live-activity approval-row" key={index}><span className="activity-icon">!</span><div><b>{event.force_manual ? '高风险操作等待确认' : '等待操作审批'}</b><small>{event.risk_reason ? riskReasonLabel(event.risk_reason) : toolLabel(event)}</small></div><span className="exit-badge">REVIEW</span></div>;
     if (event.type === 'approval_decision') return <div className="notice-row" key={index}>审批结果：{event.message}</div>;
-    if (event.type === 'final') return <article className="agent-turn live-answer" key={index}><div className="avatar agent-avatar"><span>Y</span></div><div className="turn-body"><div className="turn-meta"><b>Yukai</b><span className="thinking-label">任务完成</span><time>{event.timestamp}</time></div><div className="answer-card"><div className="answer-title"><span>✓</span><b>{event.stop_reason === 'completed' ? '完成' : '已停止'}</b><small>{event.steps} 个模型步骤</small></div><p className="answer-text">{event.text}</p></div></div></article>;
+    if (event.type === 'plan_incomplete') return <div className="notice-row" key={index}>计划尚未完成：{event.unfinished?.join('、')}</div>;
+    if (event.type === 'final') {
+      const finalState = finalStatus(event.stop_reason);
+      return <article className="agent-turn live-answer" key={index}><div className="avatar agent-avatar"><span>Y</span></div><div className="turn-body"><div className="turn-meta"><b>Yukai</b><span className="thinking-label">{finalState.meta}</span><time>{event.timestamp}</time></div><div className="answer-card"><div className="answer-title"><span>{finalState.icon}</span><b>{finalState.title}</b><small>{event.steps} 个模型步骤</small></div><p className="answer-text">{event.text}</p></div></div></article>;
+    }
     if (event.type === 'notice') return <div className="notice-row success" key={index}>{event.message}</div>;
     if (event.type === 'error') return <div className="connection-banner" key={index}>{event.error}</div>;
     return null;
@@ -660,7 +673,10 @@ function ToolResult({ event }: { event: AgentEvent }) {
   const result = event.result || {};
   const ok = Boolean(result.ok);
   const output = String(result.stdout || result.stderr || '');
-  const detail = result.duration_ms
+  const plan = result.plan as TaskPlan | undefined;
+  const detail = plan
+    ? `${plan.completed}/${plan.total} 个步骤已完成`
+    : result.duration_ms
     ? `${Math.round(Number(result.duration_ms))}ms`
     : result.error
       ? String(result.error)
@@ -668,6 +684,21 @@ function ToolResult({ event }: { event: AgentEvent }) {
         ? `exit ${result.exit_code}`
         : '';
   return <div className={`tool-result-row ${ok ? 'ok' : 'failed'}`}><span>{ok ? '✓' : '×'}</span><div><b>{ok ? '执行成功' : '执行失败'} · {event.tool}</b><small>{detail}</small>{output && <pre>{compact(output, 1600)}</pre>}</div></div>;
+}
+
+function PlanPanel({ plan }: { plan: TaskPlan }) {
+  const evidence = new Map(plan.evidence.map((item) => [item.id, item]));
+  return <section className="inspector-section plan-section">
+    <div className="panel-heading"><span>任务计划</span><b>{plan.completed}/{plan.total}</b></div>
+    <p className="plan-summary">{plan.summary}</p>
+    <div className="plan-list">{plan.steps.map((step) => {
+      const proof = step.evidence_ids.map((id) => evidence.get(id)).filter(Boolean) as PlanEvidence[];
+      return <div className={`plan-step ${step.status}`} key={step.id}>
+        <span className="plan-status">{step.status === 'completed' ? '✓' : step.status === 'in_progress' ? '●' : step.status === 'blocked' ? '!' : '○'}</span>
+        <div><b>{step.title}</b><small>{step.status === 'completed' && proof.length ? `证据 · ${proof[0].summary}` : step.status === 'blocked' ? step.note : planStatusLabel(step.status)}</small></div>
+      </div>;
+    })}</div>
+  </section>;
 }
 
 function ChangeSummary({ events, loading, onOpen }: { events: AgentEvent[]; loading: string; onOpen: (event: AgentEvent) => void }) {
@@ -744,8 +775,8 @@ function DemoActivity({ icon, title, detail, meta, warning = false }: { icon: st
   return <div className={`activity done ${warning ? 'warning' : ''}`}><span className="activity-icon">{icon}</span><div><b>{title}</b><small>{detail}</small></div><span className={meta === 'PASS' ? 'pass-badge' : warning ? 'exit-badge' : 'duration'}>{meta}</span></div>;
 }
 
-function toolIcon(tool?: string) { return ({ list_files: '⌕', read_file: '≡', search_text: '⌕', write_file: '+', edit_file: '±', make_directory: '□', run_command: '›_' } as Record<string, string>)[tool || ''] || '◆'; }
-function toolLabel(event: AgentEvent) { const args = event.arguments || {}; const path = String(args.path || '.'); return ({ list_files: `浏览 ${path}`, read_file: `读取 ${path}`, search_text: `搜索 “${args.query || ''}”`, write_file: `写入 ${path}`, edit_file: `编辑 ${path}`, make_directory: `创建目录 ${path}`, run_command: `运行 ${compact(String(args.command || ''), 90)}` } as Record<string, string>)[event.tool || ''] || String(event.tool || 'Agent 操作'); }
+function toolIcon(tool?: string) { return ({ list_files: '⌕', read_file: '≡', search_text: '⌕', write_file: '+', edit_file: '±', make_directory: '□', run_command: '›_', update_plan: '✓' } as Record<string, string>)[tool || ''] || '◆'; }
+function toolLabel(event: AgentEvent) { const args = event.arguments || {}; const path = String(args.path || '.'); return ({ list_files: `浏览 ${path}`, read_file: `读取 ${path}`, search_text: `搜索 “${args.query || ''}”`, write_file: `写入 ${path}`, edit_file: `编辑 ${path}`, make_directory: `创建目录 ${path}`, run_command: `运行 ${compact(String(args.command || ''), 90)}`, update_plan: `更新计划 · ${compact(String(args.summary || '当前任务'), 60)}` } as Record<string, string>)[event.tool || ''] || String(event.tool || 'Agent 操作'); }
 function toolDetail(event: AgentEvent) { const args = event.arguments || {}; if (event.tool === 'run_command') return String(args.command || ''); if (args.content_lines) return `${args.content_lines} 行内容`; if (args.old_text_lines || args.new_text_lines) return `替换 ${args.old_text_lines || 0} → ${args.new_text_lines || 0} 行`; return String(args.path || args.query || ''); }
 function riskReasonLabel(reason: string) {
   return ({
@@ -781,5 +812,7 @@ function sessionTime(updatedAt: number) {
 }
 function compact(value: string, limit: number) { const normalized = value.replace(/\s+/g, ' ').trim(); return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}…`; }
 function formatChars(value: number) { if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m chars`; if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k chars`; return `${value} chars`; }
+function planStatusLabel(status: PlanStep['status']) { return ({ pending: '等待执行', in_progress: '正在执行', completed: '证据已确认', blocked: '任务被阻塞' })[status]; }
+function finalStatus(reason?: string) { if (reason === 'completed') return { icon: '✓', title: '完成', meta: '任务完成' }; if (reason === 'blocked') return { icon: '!', title: '任务被阻塞', meta: '需要处理' }; if (reason === 'incomplete_plan') return { icon: '!', title: '计划未完成', meta: '未完成' }; return { icon: '■', title: '任务已停止', meta: '已停止' }; }
 function projectName(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) || path; }
 function now() { return new Date().toLocaleTimeString('zh-CN', { hour12: false }); }

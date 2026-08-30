@@ -172,6 +172,7 @@ def _tool_label(name: str, arguments: dict[str, Any]) -> str:
         "edit_file": f"Edit {path}",
         "make_directory": f"Mkdir {path}",
         "run_command": f"Bash {_one_line(str(arguments.get('command', '')), 110)}",
+        "update_plan": f"Plan {str(arguments.get('summary', 'task'))[:90]}",
     }
     return labels.get(name, f"{name} {_one_line(json.dumps(arguments, ensure_ascii=False), 100)}")
 
@@ -188,6 +189,9 @@ def _result_detail(name: str, result: dict[str, Any]) -> str:
             return str(result.get("path", "done"))
         if name == "run_command":
             return f"exit {result.get('exit_code', 0)}"
+        if name == "update_plan":
+            plan = result.get("plan", {})
+            return f"{plan.get('completed', 0)}/{plan.get('total', 0)} steps completed"
         return "done"
     error = str(result.get("error") or result.get("error_type") or "failed")
     return _one_line(error, 140)

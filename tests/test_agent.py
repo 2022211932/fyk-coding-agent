@@ -41,6 +41,15 @@ def tool_reply(arguments: str = '{"path":"."}') -> AssistantReply:
     return AssistantReply("", [call], {"role": "assistant", "content": None, "tool_calls": [call]})
 
 
+def named_tool_reply(name: str, arguments: dict, call_id: str) -> AssistantReply:
+    call = {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+    return AssistantReply("", [call], {"role": "assistant", "content": None, "tool_calls": [call]})
+
+
 class AgentLoopTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -135,6 +144,97 @@ class AgentLoopTests(unittest.TestCase):
         worker.join(timeout=1)
         self.assertFalse(worker.is_alive())
         self.assertEqual(results[0].stop_reason, "cancelled")
+
+    def test_evidence_bound_plan_completes_with_real_tool_result(self) -> None:
+        plan = [
+            {
+                "id": "inspect",
+                "title": "Inspect repository",
+                "kind": "inspect",
+                "status": "in_progress",
+            }
+        ]
+        completed_plan = [
+            {
+                **plan[0],
+                "status": "completed",
+                "evidence_ids": ["evidence-files-1"],
+            }
+        ]
+        client = FakeClient(
+            [
+                named_tool_reply("update_plan", {"summary": "Inspect", "steps": plan}, "plan-1"),
+                named_tool_reply("list_files", {"path": "."}, "files-1"),
+                named_tool_reply(
+                    "update_plan",
+                    {"summary": "Inspect", "steps": completed_plan},
+                    "plan-2",
+                ),
+                AssistantReply("Complete with evidence.", [], {"role": "assistant", "content": "Complete with evidence."}),
+            ]
+        )
+        emitted: list[tuple[str, dict]] = []
+        result = CodingAgent(
+            client,
+            self.registry,
+            notify=lambda kind, data: emitted.append((kind, data)),
+        ).run("Inspect this repository carefully")
+        self.assertEqual(result.stop_reason, "completed")
+        self.assertEqual(result.final_text, "Complete with evidence.")
+        evidence_result = client.requests[2][-1]["content"]
+        self.assertIn('"evidence_id": "evidence-files-1"', evidence_result)
+        plan_events = [data for kind, data in emitted if kind == "plan_updated"]
+        self.assertEqual(plan_events[-1]["plan"]["completed"], 1)
+
+    def test_unfinished_plan_prevents_false_completion(self) -> None:
+        pending_plan = [
+            {
+                "id": "verify",
+                "title": "Run tests",
+                "kind": "verify",
+                "status": "pending",
+            }
+        ]
+        client = FakeClient(
+            [
+                named_tool_reply(
+                    "update_plan",
+                    {"summary": "Verify", "steps": pending_plan},
+                    "plan-1",
+                ),
+                AssistantReply("Everything passed.", [], {"role": "assistant", "content": "Everything passed."}),
+                AssistantReply("It is complete.", [], {"role": "assistant", "content": "It is complete."}),
+            ]
+        )
+        result = CodingAgent(client, self.registry, max_steps=3).run("Run the tests")
+        self.assertEqual(result.stop_reason, "incomplete_plan")
+        self.assertIn("Run tests", result.final_text)
+        self.assertEqual(client.requests[2][-1]["role"], "system")
+
+    def test_blocked_plan_has_distinct_stop_reason(self) -> None:
+        client = FakeClient(
+            [
+                named_tool_reply(
+                    "update_plan",
+                    {
+                        "summary": "Unavailable task",
+                        "steps": [
+                            {
+                                "id": "blocked",
+                                "title": "Contact service",
+                                "kind": "other",
+                                "status": "blocked",
+                                "note": "Network access is unavailable",
+                            }
+                        ],
+                    },
+                    "plan-1",
+                ),
+                AssistantReply("Blocked by the environment.", [], {"role": "assistant", "content": "Blocked by the environment."}),
+            ]
+        )
+        result = CodingAgent(client, self.registry).run("Contact the service")
+        self.assertEqual(result.stop_reason, "blocked")
 
 
 if __name__ == "__main__":

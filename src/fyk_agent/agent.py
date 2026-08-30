@@ -9,6 +9,7 @@ from typing import Any, Callable, Protocol
 from .client import AssistantReply
 from .context import ContextManager, message_size
 from .events import EventLog
+from .planning import PlanTracker
 from .tools import ToolRegistry
 
 
@@ -16,12 +17,14 @@ SYSTEM_PROMPT = """You are Yukai, an autonomous programming assistant operating 
 
 Work method:
 1. Inspect the repository before making assumptions.
-2. Form a short plan internally, then use tools to complete the task.
+2. For a multi-step task, create a concise user-visible plan with update_plan before acting. Skip it for simple questions or a single read-only lookup.
 3. Prefer small, exact edits. Read the relevant file before editing it.
 4. Run focused tests after changes, then broader tests when practical.
 5. If a tool fails, use its structured error to correct the next attempt.
 6. Do not claim a change or test succeeded unless a tool result proves it.
 7. Finish with a concise summary of changes, verification, and any remaining risk.
+8. Update the plan only when a stage changes. A completed step must cite compatible evidence IDs returned by actual tools.
+9. Do not finish while a plan has pending or in_progress steps. Mark an impossible step blocked with a concrete reason.
 
 Safety:
 - All paths must be relative to the workspace.
@@ -70,6 +73,7 @@ class CodingAgent:
         self.notify = notify or (lambda _kind, _data: None)
         self._supports_cancellation = cancelled is not None
         self.cancelled = cancelled or (lambda: False)
+        self.plan = PlanTracker()
 
     def run(
         self,
@@ -78,6 +82,9 @@ class CodingAgent:
     ) -> RunResult:
         if not isinstance(task, str) or not task.strip():
             raise ValueError("Task must be a non-empty string")
+        self.plan.reset()
+        plan_completion_reminders = 0
+        self.notify("plan_reset", {"step": 0})
         if history is None:
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -116,13 +123,44 @@ class CodingAgent:
             )
 
             if not reply.tool_calls:
+                if self.plan.plan.exists and not self.plan.plan.terminal:
+                    unfinished = self.plan.plan.unfinished_titles()
+                    if plan_completion_reminders < 1 and step < self.max_steps:
+                        plan_completion_reminders += 1
+                        reminder = (
+                            "You cannot finish yet because the task plan still has unfinished steps: "
+                            + "; ".join(unfinished)
+                            + ". Continue the work, or call update_plan to mark an impossible step "
+                            "blocked with a concrete reason."
+                        )
+                        messages.append({"role": "system", "content": reminder})
+                        self.notify(
+                            "plan_incomplete",
+                            {"step": step, "unfinished": unfinished},
+                        )
+                        continue
+                    final_text = (
+                        "任务未完成：结构化计划中仍有未收尾步骤——"
+                        + "；".join(unfinished)
+                        + "。"
+                    )
+                    self.events.emit("run_finished", reason="incomplete_plan", steps=step)
+                    self.notify("finished", {"step": step, "reason": "incomplete_plan"})
+                    return RunResult(
+                        final_text,
+                        step,
+                        "incomplete_plan",
+                        messages,
+                        self.context.compactions,
+                    )
                 final_text = reply.content.strip() or "Task ended without a textual response."
-                self.events.emit("run_finished", reason="completed", steps=step)
-                self.notify("finished", {"step": step, "reason": "completed"})
+                reason = "blocked" if self.plan.plan.blocked else "completed"
+                self.events.emit("run_finished", reason=reason, steps=step)
+                self.notify("finished", {"step": step, "reason": reason})
                 return RunResult(
                     final_text,
                     step,
-                    "completed",
+                    reason,
                     messages,
                     self.context.compactions,
                 )
@@ -141,8 +179,18 @@ class CodingAgent:
                         "error": parse_error,
                         "error_type": "invalid_tool_call",
                     }
+                elif name == "update_plan":
+                    result = self.plan.update(arguments)
+                    if result.get("ok"):
+                        plan_payload = self.plan.payload()
+                        self.events.emit("plan_updated", step=step, plan=plan_payload)
+                        self.notify("plan_updated", {"step": step, "plan": plan_payload})
                 else:
                     result = self.tools.execute(name, arguments)
+                    evidence_id = self.plan.register_evidence(
+                        name, arguments, result, step=step, evidence_id=call_id
+                    )
+                    result = {**result, "evidence_id": evidence_id}
                 messages.append(
                     {
                         "role": "tool",
@@ -192,14 +240,14 @@ class CodingAgent:
         self, messages: list[dict[str, Any]]
     ) -> AssistantReply:
         if not self._supports_cancellation:
-            return self.client.complete(messages, self.tools.schemas)
+            return self.client.complete(messages, self._model_tools())
         if self.cancelled():
             raise RunCancelled
         outcomes: queue.Queue[AssistantReply | Exception] = queue.Queue(maxsize=1)
 
         def complete() -> None:
             try:
-                outcomes.put(self.client.complete(messages, self.tools.schemas))
+                outcomes.put(self.client.complete(messages, self._model_tools()))
             except Exception as exc:  # Preserve the model client's original error.
                 outcomes.put(exc)
 
@@ -215,6 +263,9 @@ class CodingAgent:
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
+
+    def _model_tools(self) -> list[dict[str, Any]]:
+        return [*self.tools.schemas, self.plan.schema]
 
     def _notify_context(self, messages: list[dict[str, Any]], *, step: int) -> None:
         self.notify(
