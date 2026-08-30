@@ -47,7 +47,7 @@ class TerminalUI:
         width = 72
         title = f" Yukai {version} "
         top = "╭─" + title + "─" * max(0, width - len(title) - 2) + "╮"
-        approval = "auto-approve" if automatic_approval else "ask before changes"
+        approval = "auto-approve safe changes; ask for high-risk commands" if automatic_approval else "ask before changes"
         self.write(self.paint(top, CYAN))
         self.write(f"│  Model      {self.paint(model, BOLD)}")
         self.write(f"│  Workspace  {workspace}")
@@ -88,10 +88,23 @@ class TerminalUI:
         meta = f"{steps} model step(s) · {stop_reason} · {compactions} context compaction(s)"
         self.write(self.paint(meta, DIM))
 
-    def approval(self, name: str, arguments: dict[str, Any]) -> str:
-        self.write("\n" + self.paint("Permission required", YELLOW + BOLD))
+    def approval(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        risk_reason: str = "",
+        allow_all: bool = True,
+    ) -> str:
+        title = "High-risk operation requires confirmation" if risk_reason else "Permission required"
+        self.write("\n" + self.paint(title, YELLOW + BOLD))
         self.write(f"  {_tool_label(name, arguments)}")
-        self.write(self.paint("  y: allow once  n: reject  a: allow all for this session", DIM))
+        if risk_reason:
+            self.write(self.paint(f"  Risk: {risk_reason}", RED))
+        choices = "  y: allow once  n: reject"
+        if allow_all:
+            choices += "  a: allow all safe changes for this session"
+        self.write(self.paint(choices, DIM))
         try:
             return input(self.paint("  Allow? [y/N/a] ", YELLOW)).strip().lower()
         except EOFError:

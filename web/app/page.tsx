@@ -15,6 +15,8 @@ type AgentEvent = {
   stop_reason?: string;
   compactions?: number;
   approval_id?: string;
+  force_manual?: boolean;
+  risk_reason?: string;
   timestamp?: string;
 };
 
@@ -393,6 +395,7 @@ export default function Home() {
 
   async function decide(decision: 'allow' | 'allow_all' | 'reject') {
     if (!approval?.approval_id) return;
+    const forceManual = Boolean(approval.force_manual);
     const { api, token } = connection.current;
     await fetch(`${api}/api/approvals/${approval.approval_id}`, {
       method: 'POST',
@@ -401,7 +404,7 @@ export default function Home() {
     });
     appendEvent(sessionId, { type: 'approval_decision', message: decision, timestamp: now() });
     setApproval(null);
-    if (decision === 'allow_all' && status) setStatus({ ...status, automatic_approval: true });
+    if (decision === 'allow_all' && status && !forceManual) setStatus({ ...status, automatic_approval: true });
   }
 
   async function undo() {
@@ -470,7 +473,7 @@ export default function Home() {
           <form className="composer" onSubmit={submit}>
             {running && <div className="queue-toast"><span />Agent 正在执行任务</div>}
             <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={live ? '继续交给 Yukai 一个任务…' : '输入任务体验交互效果…'} aria-label="输入任务" rows={2} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-            <div className="composer-foot"><div><button type="button" className="mini-button">＋</button><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span></div><div><button type="button" className={`approval-switch ${status?.automatic_approval ? 'enabled' : ''}`} role="switch" aria-checked={Boolean(status?.automatic_approval)} onClick={toggleAutomaticApproval} disabled={!live || running} title="开启后，写文件和运行命令将不再逐次询问"><span><i /></span>{status?.automatic_approval ? '自动审批' : '手动审批'}</button><button className="send" type="submit" disabled={!prompt.trim() || running}>{running ? '执行中…' : '运行任务'} <span>↵</span></button></div></div>
+            <div className="composer-foot"><div><button type="button" className="mini-button">＋</button><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span></div><div><button type="button" className={`approval-switch ${status?.automatic_approval ? 'enabled' : ''}`} role="switch" aria-checked={Boolean(status?.automatic_approval)} onClick={toggleAutomaticApproval} disabled={!live || running} title="安全操作可自动通过，高风险命令始终需要人工确认"><span><i /></span>{status?.automatic_approval ? '安全操作自动审批' : '手动审批'}</button><button className="send" type="submit" disabled={!prompt.trim() || running}>{running ? '执行中…' : '运行任务'} <span>↵</span></button></div></div>
           </form>
         </section>
 
@@ -481,7 +484,7 @@ export default function Home() {
           </section>
           <section className="inspector-section"><div className="panel-heading"><span>文件变更</span><small>{events.filter((item) => item.tool === 'edit_file' || item.tool === 'write_file').length || (live ? 0 : 1)} FILE</small></div>{live ? <ChangeSummary events={events} /> : <><button className="change-card"><span className="python-icon">Py</span><div><b>slugify.py</b><small><em>+12</em> <del>−1</del></small></div><span>›</span></button><button className="diff-button">查看完整 Diff <span>↗</span></button></>}</section>
           <section className="inspector-section file-section"><div className="panel-heading"><span>工作区</span><button onClick={refreshFiles}>↻</button></div><div className="file-tree">{shownFiles.map((file) => <div key={file.path}><span>{file.type === 'directory' ? '▾' : file.path.endsWith('.py') ? 'Py' : '≡'}</span><b>{file.path}</b>{events.some((event) => String(event.arguments?.path || '') === file.path && ['write_file', 'edit_file'].includes(event.tool || '')) && <em>M</em>}</div>)}</div></section>
-          <section className="safety-card"><span className="shield">◇</span><div><b>工作区隔离已开启</b><small>{live ? '随机令牌 · 仅限 127.0.0.1' : '演示模式未连接本地文件'}</small></div></section>
+          <section className="safety-card"><span className="shield">◇</span><div><b>危险命令防护已开启</b><small>{live ? '高风险需确认 · 灾难性操作直接拦截' : '演示模式未连接本地文件'}</small></div></section>
         </aside>
       </div>
 
@@ -527,7 +530,7 @@ function LiveTimeline({ events, running }: { events: AgentEvent[]; running: bool
     if (event.type === 'model_request') return <div className="live-activity thinking-row" key={index}><span className="pulse" /><div><b>DeepSeek 正在思考</b><small>模型步骤 {event.step}</small></div></div>;
     if (event.type === 'tool_call') return <div className="live-activity" key={index}><span className="activity-icon">{toolIcon(event.tool)}</span><div><b>{toolLabel(event)}</b><small>{toolDetail(event)}</small></div><span className="running-dot" /></div>;
     if (event.type === 'tool_result') return <ToolResult event={event} key={index} />;
-    if (event.type === 'approval_required') return <div className="live-activity approval-row" key={index}><span className="activity-icon">!</span><div><b>等待操作审批</b><small>{toolLabel(event)}</small></div><span className="exit-badge">REVIEW</span></div>;
+    if (event.type === 'approval_required') return <div className="live-activity approval-row" key={index}><span className="activity-icon">!</span><div><b>{event.force_manual ? '高风险操作等待确认' : '等待操作审批'}</b><small>{event.risk_reason ? riskReasonLabel(event.risk_reason) : toolLabel(event)}</small></div><span className="exit-badge">REVIEW</span></div>;
     if (event.type === 'approval_decision') return <div className="notice-row" key={index}>审批结果：{event.message}</div>;
     if (event.type === 'final') return <article className="agent-turn live-answer" key={index}><div className="avatar agent-avatar"><span>Y</span></div><div className="turn-body"><div className="turn-meta"><b>Yukai</b><span className="thinking-label">任务完成</span><time>{event.timestamp}</time></div><div className="answer-card"><div className="answer-title"><span>✓</span><b>{event.stop_reason === 'completed' ? '完成' : '已停止'}</b><small>{event.steps} 个模型步骤</small></div><p className="answer-text">{event.text}</p></div></div></article>;
     if (event.type === 'notice') return <div className="notice-row success" key={index}>{event.message}</div>;
@@ -557,7 +560,7 @@ function ChangeSummary({ events }: { events: AgentEvent[] }) {
 }
 
 function ApprovalDialog({ event, onDecision }: { event: AgentEvent; onDecision: (decision: 'allow' | 'allow_all' | 'reject') => void }) {
-  return <div className="modal-backdrop"><section className="approval-dialog" role="dialog" aria-modal="true" aria-labelledby="approval-title"><div className="approval-symbol">!</div><p className="eyebrow">PERMISSION REQUIRED</p><h2 id="approval-title">允许 Agent 执行此操作？</h2><div className="approval-operation"><span className="activity-icon">{toolIcon(event.tool)}</span><div><b>{toolLabel(event)}</b><small>{toolDetail(event)}</small></div></div><p>此操作可能修改工作区或执行本地命令。请确认内容符合你的预期。</p><div className="approval-actions"><button onClick={() => onDecision('reject')}>拒绝</button><button onClick={() => onDecision('allow_all')}>本次会话全部允许</button><button className="primary" onClick={() => onDecision('allow')}>允许一次</button></div></section></div>;
+  return <div className="modal-backdrop"><section className={`approval-dialog ${event.force_manual ? 'high-risk' : ''}`} role="dialog" aria-modal="true" aria-labelledby="approval-title"><div className="approval-symbol">!</div><p className="eyebrow">{event.force_manual ? 'HIGH-RISK CONFIRMATION' : 'PERMISSION REQUIRED'}</p><h2 id="approval-title">{event.force_manual ? '确认执行高风险操作？' : '允许 Agent 执行此操作？'}</h2><div className="approval-operation"><span className="activity-icon">{toolIcon(event.tool)}</span><div><b>{toolLabel(event)}</b><small>{toolDetail(event)}</small></div></div>{event.risk_reason && <div className="risk-reason"><b>风险原因</b><span>{riskReasonLabel(event.risk_reason)}</span></div>}<p>{event.force_manual ? '自动审批不会跳过这一步。只有明确确认后，本次操作才会执行。' : '此操作可能修改工作区或执行本地命令。请确认内容符合你的预期。'}</p><div className="approval-actions"><button onClick={() => onDecision('reject')}>拒绝</button>{!event.force_manual && <button onClick={() => onDecision('allow_all')}>本次会话自动审批</button>}<button className="primary" onClick={() => onDecision('allow')}>允许一次</button></div></section></div>;
 }
 
 function ProjectPicker({ projects, directory, error, switching, onBrowse, onSelect, onClose }: { projects: Projects | null; directory: DirectoryListing | null; error: string; switching: boolean; onBrowse: (path?: string) => void; onSelect: (path: string) => void; onClose: () => void }) {
@@ -618,6 +621,18 @@ function DemoActivity({ icon, title, detail, meta, warning = false }: { icon: st
 function toolIcon(tool?: string) { return ({ list_files: '⌕', read_file: '≡', search_text: '⌕', write_file: '+', edit_file: '±', make_directory: '□', run_command: '›_' } as Record<string, string>)[tool || ''] || '◆'; }
 function toolLabel(event: AgentEvent) { const args = event.arguments || {}; const path = String(args.path || '.'); return ({ list_files: `浏览 ${path}`, read_file: `读取 ${path}`, search_text: `搜索 “${args.query || ''}”`, write_file: `写入 ${path}`, edit_file: `编辑 ${path}`, make_directory: `创建目录 ${path}`, run_command: `运行 ${compact(String(args.command || ''), 90)}` } as Record<string, string>)[event.tool || ''] || String(event.tool || 'Agent 操作'); }
 function toolDetail(event: AgentEvent) { const args = event.arguments || {}; if (event.tool === 'run_command') return String(args.command || ''); if (args.content_lines) return `${args.content_lines} 行内容`; if (args.old_text_lines || args.new_text_lines) return `替换 ${args.old_text_lines || 0} → ${args.new_text_lines || 0} 行`; return String(args.path || args.query || ''); }
+function riskReasonLabel(reason: string) {
+  return ({
+    'command deletes files or directories': '该命令会删除文件或目录',
+    'command can discard or overwrite Git data': '该命令可能丢弃或覆盖 Git 数据',
+    'command requests elevated privileges': '该命令请求提升系统权限',
+    'command changes permissions or system configuration': '该命令会修改权限或系统配置',
+    'command downloads and executes remote content': '该命令会下载并执行远程内容',
+    'command references a path outside the workspace': '该命令引用了工作区外的路径',
+    'compound shell syntax can hide additional operations': '复合 shell 语法可能隐藏额外操作',
+    'command is not on the automatic-execution allowlist': '该命令不在自动执行白名单中',
+  } as Record<string, string>)[reason] || reason;
+}
 function createConversationSession(): ConversationSession {
   return {
     id: `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`,

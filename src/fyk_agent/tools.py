@@ -5,6 +5,7 @@ import fnmatch
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import time
@@ -22,6 +23,12 @@ MAX_SEARCH_FILE_BYTES = 1_000_000
 
 class ToolError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class RiskAssessment:
+    level: str
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,11 +55,13 @@ class ToolRegistry:
         self,
         workspace: Workspace,
         approve: Callable[[str, dict[str, Any]], bool] | None = None,
+        approve_risky: Callable[[str, dict[str, Any], str], bool] | None = None,
     ):
         self.workspace = workspace
         self.journal = ChangeJournal(workspace.root)
         self.events = EventLog(workspace.root)
         self.approve = approve or (lambda _name, _arguments: True)
+        self.approve_risky = approve_risky or (lambda _name, _arguments, _reason: False)
         self._specs = self._build_specs()
 
     @property
@@ -68,10 +77,25 @@ class ToolRegistry:
             return result
         if not isinstance(arguments, dict):
             return _failure("Tool arguments must be a JSON object", error_type="invalid_arguments")
-        if spec.changes_state and not self.approve(name, arguments):
-            result = _failure("User rejected this operation", error_type="rejected")
-            self.events.emit("tool_rejected", tool=name)
+        risk = assess_tool_risk(name, arguments)
+        if risk.level == "blocked":
+            result = _failure(
+                f"Blocked by safety policy: {risk.reason}",
+                error_type="blocked_by_safety_policy",
+            )
+            self.events.emit("tool_blocked", tool=name, reason=risk.reason)
             return result
+        if spec.changes_state:
+            approved = (
+                self.approve_risky(name, arguments, risk.reason)
+                if risk.level == "high"
+                else self.approve(name, arguments)
+            )
+            if not approved:
+                message = "User rejected this high-risk operation" if risk.level == "high" else "User rejected this operation"
+                result = _failure(message, error_type="rejected")
+                self.events.emit("tool_rejected", tool=name, risk=risk.level)
+                return result
 
         try:
             result = spec.handler(**arguments)
@@ -413,6 +437,61 @@ def _object_schema(
         "required": required or [],
         "additionalProperties": False,
     }
+
+
+_SAFE_COMMAND_PATTERNS = [
+    r"^(?:python|py)(?:\.exe)?\s+-m\s+(?:pytest|unittest|compileall)\b",
+    r"^pytest\b",
+    r"^(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|lint|build|check|typecheck))\b",
+    r"^git\s+(?:status|diff|log|show)\b",
+    r"^(?:rg|grep|ls|dir|pwd|tree|type|cat|where|which|get-childitem|get-content|select-string)\b",
+    r"^(?:ruff|mypy|eslint|tsc)\b",
+    r"^go\s+test\b",
+    r"^cargo\s+(?:test|check)\b",
+    r"^dotnet\s+(?:test|build)\b",
+]
+
+_BLOCKED_COMMAND_PATTERNS = [
+    (r"(?:^|\s)(?:shutdown|reboot|halt|poweroff|stop-computer|restart-computer)(?:\s|$)", "system shutdown and restart commands are not allowed"),
+    (r"(?:^|\s)(?:mkfs(?:\.[a-z0-9]+)?|fdisk|parted|diskpart)(?:\s|$)", "disk formatting and partition commands are not allowed"),
+    (r"\bdd\s+.*\bof\s*=\s*(?:/dev/|\\\\\.\\)", "raw writes to block devices are not allowed"),
+    (r"(?:^|\s)format(?:\.com)?\s+[a-z]:", "formatting a drive is not allowed"),
+    (r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", "fork bombs are not allowed"),
+    (r"\brm\b[^\r\n]*(?:-[a-z]*r|--recursive|--no-preserve-root)[^\r\n]*(?:\s/\*?(?:\s|$)|\s~(?:\s|$)|\s\$\{?home\}?(?:\s|$)|\s[a-z]:\\(?:\s|$))", "recursive deletion of a system or home root is not allowed"),
+    (r"\bremove-item\b[^\r\n]*(?:^|\s)-recurse\b[^\r\n]*(?:[a-z]:\\(?=\s|$)|\$home\b|\$env:userprofile\b)", "recursive deletion of a drive or home directory is not allowed"),
+    (r"\bremove-item\b[^\r\n]*(?:[a-z]:\\(?=\s|$)|\$home\b|\$env:userprofile\b)[^\r\n]*(?:^|\s)-recurse\b", "recursive deletion of a drive or home directory is not allowed"),
+    (r"\b(?:del|rd|rmdir)\b[^\r\n]*(?:/s\b|/q\b)[^\r\n]*[a-z]:\\(?:\*\.?\*?)?(?:\s|$)", "recursive deletion of a drive root is not allowed"),
+    (r"\b(?:del|rd|rmdir)\b[^\r\n]*[a-z]:\\(?:\*\.?\*?)?[^\r\n]*(?:/s\b|/q\b)", "recursive deletion of a drive root is not allowed"),
+]
+
+_HIGH_RISK_COMMAND_PATTERNS = [
+    (r"(?:^|\s)(?:rm|del|erase|rmdir|rd|remove-item|unlink)(?:\s|$)", "command deletes files or directories"),
+    (r"\bgit\s+(?:reset\s+--hard|clean\b|push\b[^\r\n]*(?:--force(?:-with-lease)?|-f\b)|restore\b|checkout\b[^\r\n]*\s--\s)", "command can discard or overwrite Git data"),
+    (r"(?:^|\s)(?:sudo|su|runas|doas)(?:\s|$)|\bstart-process\b[^\r\n]*\b-verb\s+runas\b", "command requests elevated privileges"),
+    (r"\b(?:chmod|chown|icacls|takeown|set-acl|reg\s+(?:add|delete))\b", "command changes permissions or system configuration"),
+    (r"\b(?:curl|wget|invoke-webrequest|iwr)\b[^\r\n]*(?:\||invoke-expression|iex\b|\bsh\b|\bbash\b|powershell)", "command downloads and executes remote content"),
+    (r"(?:\.\.[/\\]|(?:^|\s)[a-z]:\\|(?:^|\s)/(?:etc|usr|var|home|root|opt|bin|sbin|dev|proc|sys)(?:/|\s|$))", "command references a path outside the workspace"),
+]
+
+
+def assess_tool_risk(name: str, arguments: dict[str, Any]) -> RiskAssessment:
+    if name != "run_command":
+        return RiskAssessment("normal")
+    command = arguments.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return RiskAssessment("normal")
+    normalized = " ".join(command.casefold().split())
+    for pattern, reason in _BLOCKED_COMMAND_PATTERNS:
+        if re.search(pattern, normalized, flags=re.IGNORECASE):
+            return RiskAssessment("blocked", reason)
+    for pattern, reason in _HIGH_RISK_COMMAND_PATTERNS:
+        if re.search(pattern, normalized, flags=re.IGNORECASE):
+            return RiskAssessment("high", reason)
+    if re.search(r"(?:&&|\|\||[;|<>`]|\$\()", normalized):
+        return RiskAssessment("high", "compound shell syntax can hide additional operations")
+    if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in _SAFE_COMMAND_PATTERNS):
+        return RiskAssessment("normal")
+    return RiskAssessment("high", "command is not on the automatic-execution allowlist")
 
 
 def _bounded_int(value: Any, minimum: int, maximum: int, name: str) -> None:

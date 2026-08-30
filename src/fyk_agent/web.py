@@ -152,8 +152,11 @@ class WebAgentState:
         name: str,
         arguments: dict[str, Any],
         emit: Callable[[str, dict[str, Any]], None],
+        *,
+        force_manual: bool = False,
+        risk_reason: str = "",
     ) -> bool:
-        if self.automatic_approval:
+        if self.automatic_approval and not force_manual:
             return True
         approval_id = secrets.token_urlsafe(12)
         pending = PendingApproval()
@@ -161,13 +164,20 @@ class WebAgentState:
             self.approvals[approval_id] = pending
         emit(
             "approval_required",
-            {"approval_id": approval_id, "tool": name, "arguments": _safe_arguments(arguments)},
+            {
+                "approval_id": approval_id,
+                "tool": name,
+                "arguments": _safe_arguments(arguments),
+                "force_manual": force_manual,
+                "risk_reason": risk_reason,
+            },
         )
         pending.event.wait(timeout=300)
         with self.approvals_lock:
             self.approvals.pop(approval_id, None)
         if pending.decision == "allow_all":
-            self.set_automatic_approval(True)
+            if not force_manual:
+                self.set_automatic_approval(True)
             return True
         return pending.decision == "allow"
 
@@ -383,6 +393,13 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
             registry = ToolRegistry(
                 workspace,
                 approve=lambda name, arguments: state.request_approval(name, arguments, emit),
+                approve_risky=lambda name, arguments, reason: state.request_approval(
+                    name,
+                    arguments,
+                    emit,
+                    force_manual=True,
+                    risk_reason=reason,
+                ),
             )
             agent = CodingAgent(
                 OpenAICompatibleClient(state.settings),

@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--workspace",
         help="Workspace directory (web mode remembers the last selected project)",
     )
-    parser.add_argument("-y", "--yes", action="store_true", help="Approve all state-changing tools")
+    parser.add_argument("-y", "--yes", action="store_true", help="Auto-approve safe changes; high-risk commands still ask")
     parser.add_argument("--model", help="Override DEEPSEEK_MODEL for this session")
     parser.add_argument("--max-steps", type=int, help="Maximum model steps per user prompt")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI terminal colors")
@@ -51,6 +51,15 @@ class ApprovalController:
             self.approve_all = True
             self.ui.notice("Automatic approval enabled for the rest of this session.")
             return True
+        return answer in {"y", "yes"}
+
+    def require_explicit(self, name: str, arguments: dict[str, Any], reason: str) -> bool:
+        answer = self.ui.approval(
+            name,
+            _safe_arguments(arguments),
+            risk_reason=reason,
+            allow_all=False,
+        )
         return answer in {"y", "yes"}
 
 
@@ -78,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     approvals = ApprovalController(ui, approve_all=args.yes)
-    registry = ToolRegistry(workspace, approve=approvals)
+    registry = ToolRegistry(workspace, approve=approvals, approve_risky=approvals.require_explicit)
     agent = CodingAgent(
         OpenAICompatibleClient(settings),
         registry,

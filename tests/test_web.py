@@ -180,6 +180,68 @@ class WebConsoleTests(unittest.TestCase):
         self.assertEqual(pending.decision, "allow")
         self.assertFalse(self.state.resolve_approval("missing", "allow"))
 
+    def test_automatic_mode_still_requests_high_risk_confirmation(self) -> None:
+        self.state.automatic_approval = True
+        emitted: list[tuple[str, dict]] = []
+        approval_ready = threading.Event()
+        result: list[bool] = []
+
+        def emit(kind: str, payload: dict) -> None:
+            emitted.append((kind, payload))
+            approval_ready.set()
+
+        worker = threading.Thread(
+            target=lambda: result.append(
+                self.state.request_approval(
+                    "run_command",
+                    {"command": "git reset --hard"},
+                    emit,
+                    force_manual=True,
+                    risk_reason="command can discard Git data",
+                )
+            ),
+            daemon=True,
+        )
+        worker.start()
+        self.assertTrue(approval_ready.wait(timeout=2))
+        event = emitted[0][1]
+        self.assertTrue(event["force_manual"])
+        self.assertIn("Git", event["risk_reason"])
+        self.assertTrue(self.state.resolve_approval(event["approval_id"], "allow"))
+        worker.join(timeout=2)
+
+        self.assertEqual(result, [True])
+        self.assertTrue(self.state.automatic_approval)
+
+    def test_high_risk_allow_all_does_not_enable_automatic_mode(self) -> None:
+        emitted: list[dict] = []
+        approval_ready = threading.Event()
+        result: list[bool] = []
+
+        def emit(_kind: str, payload: dict) -> None:
+            emitted.append(payload)
+            approval_ready.set()
+
+        worker = threading.Thread(
+            target=lambda: result.append(
+                self.state.request_approval(
+                    "run_command",
+                    {"command": "git reset --hard"},
+                    emit,
+                    force_manual=True,
+                    risk_reason="command can discard Git data",
+                )
+            ),
+            daemon=True,
+        )
+        worker.start()
+        self.assertTrue(approval_ready.wait(timeout=2))
+        self.assertTrue(self.state.resolve_approval(emitted[0]["approval_id"], "allow_all"))
+        worker.join(timeout=2)
+
+        self.assertEqual(result, [True])
+        self.assertFalse(self.state.automatic_approval)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 
-from fyk_agent.tools import ToolRegistry
+from fyk_agent.tools import ToolRegistry, assess_tool_risk
 from fyk_agent.workspace import Workspace
 
 
@@ -12,7 +12,11 @@ class ToolRegistryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.registry = ToolRegistry(Workspace(self.root), approve=lambda _name, _args: True)
+        self.registry = ToolRegistry(
+            Workspace(self.root),
+            approve=lambda _name, _args: True,
+            approve_risky=lambda _name, _args, _reason: True,
+        )
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -86,6 +90,63 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["stdout"].strip(), "hidden")
         self.assertEqual(result["exit_code"], 0)
+
+    def test_catastrophic_command_is_blocked_before_approval(self) -> None:
+        approvals: list[str] = []
+        registry = ToolRegistry(
+            Workspace(self.root),
+            approve=lambda _name, _args: True,
+            approve_risky=lambda _name, _args, reason: approvals.append(reason) or True,
+        )
+
+        commands = [
+            "rm -rf /",
+            "rm --recursive --force /",
+            r"Remove-Item C:\ -Recurse -Force",
+            "shutdown /s /t 0",
+            "format C:",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                result = registry.execute("run_command", {"command": command})
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error_type"], "blocked_by_safety_policy")
+        self.assertEqual(approvals, [])
+
+    def test_high_risk_command_requires_explicit_approval(self) -> None:
+        approvals: list[str] = []
+        registry = ToolRegistry(
+            Workspace(self.root),
+            approve=lambda _name, _args: True,
+            approve_risky=lambda _name, _args, reason: approvals.append(reason) or False,
+        )
+
+        result = registry.execute("run_command", {"command": "git reset --hard"})
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "rejected")
+        self.assertIn("Git", approvals[0])
+
+    def test_known_test_command_can_use_automatic_approval(self) -> None:
+        risky_approvals: list[str] = []
+        registry = ToolRegistry(
+            Workspace(self.root),
+            approve=lambda _name, _args: True,
+            approve_risky=lambda _name, _args, reason: risky_approvals.append(reason) or False,
+        )
+
+        result = registry.execute(
+            "run_command",
+            {"command": "python -m compileall .", "timeout": 10},
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(risky_approvals, [])
+
+    def test_unknown_command_is_high_risk_by_default(self) -> None:
+        assessment = assess_tool_risk("run_command", {"command": "python custom_script.py"})
+        self.assertEqual(assessment.level, "high")
+        self.assertIn("allowlist", assessment.reason)
 
 
 if __name__ == "__main__":
