@@ -46,10 +46,13 @@ button { color: inherit; }
 .session-rail { border-right: 1px solid var(--line); padding: 18px 12px; position: sticky; top: 62px; height: calc(100vh - 62px); display: flex; flex-direction: column; }
 .new-session { height: 38px; border: 1px solid #2c3b46; background: #141d25; border-radius: 8px; color: #d8e0df; font-size: 12px; cursor: pointer; transition: .2s ease; }
 .new-session:hover { border-color: rgba(100,230,194,.55); background: var(--mint-soft); }
+.new-session:disabled { opacity: .5; cursor: default; }
+.new-session:disabled:hover { border-color: #2c3b46; background: #141d25; }
 .new-session span { color: var(--mint); font-size: 16px; margin-right: 6px; }
 .rail-label { color: var(--faint); font-size: 9px; letter-spacing: .14em; font-weight: 700; margin: 24px 10px 9px; }
 .session-item { width: 100%; border: 0; background: transparent; display: grid; grid-template-columns: 16px 1fr auto; text-align: left; gap: 7px; padding: 10px 9px; border-radius: 8px; cursor: pointer; color: var(--muted); }
 .session-item:hover { background: #111820; }
+.session-item:disabled { cursor: default; }
 .session-item.active { color: var(--text); background: linear-gradient(90deg, rgba(100,230,194,.11), rgba(100,230,194,.025)); box-shadow: inset 2px 0 var(--mint); }
 .session-glyph { color: var(--faint); font-size: 9px; padding-top: 3px; }
 .session-item.active .session-glyph { color: var(--mint); }

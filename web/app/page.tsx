@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 
 type AgentEvent = {
   type: string;
@@ -33,6 +33,13 @@ type DirectoryListing = {
   entries: DirectoryEntry[];
 };
 type Projects = { current: string; recent: string[]; roots: DirectoryEntry[] };
+type ConversationSession = {
+  id: string;
+  title: string;
+  events: AgentEvent[];
+  updatedAt: number;
+};
+type ConversationStore = { items: ConversationSession[]; activeId: string };
 
 const demoSessions = [
   { title: '修复 slugify 测试', time: '刚刚', active: true },
@@ -42,7 +49,10 @@ const demoSessions = [
 
 export default function Home() {
   const [prompt, setPrompt] = useState('');
-  const [events, setEvents] = useState<AgentEvent[]>([]);
+  const [conversationStore, setConversationStore] = useState<ConversationStore>(() => {
+    const session = createConversationSession();
+    return { items: [session], activeId: session.id };
+  });
   const [status, setStatus] = useState<Status | null>(null);
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [running, setRunning] = useState(false);
@@ -53,17 +63,42 @@ export default function Home() {
   const [directory, setDirectory] = useState<DirectoryListing | null>(null);
   const [pickerError, setPickerError] = useState('');
   const [switchingWorkspace, setSwitchingWorkspace] = useState(false);
-  const [sessionId] = useState(() => `web-${Date.now().toString(36)}`);
   const connection = useRef({ api: '', token: '' });
   const timelineEnd = useRef<HTMLDivElement>(null);
 
   const live = Boolean(status);
+  const activeSession = conversationStore.items.find((session) => session.id === conversationStore.activeId) || conversationStore.items[0];
+  const events = activeSession.events;
+  const sessionId = activeSession.id;
   const toolCalls = events.filter((event) => event.type === 'tool_call').length;
   const latestStep = events.reduce((max, event) => Math.max(max, event.step || event.steps || 0), 0);
-  const currentTitle = useMemo(() => {
-    const first = events.find((event) => event.type === 'user')?.message;
-    return first ? compact(first, 34) : live ? '新会话' : '修复 slugify 测试';
-  }, [events, live]);
+  const currentTitle = live ? activeSession.title : '修复 slugify 测试';
+
+  function updateSession(targetId: string, update: (session: ConversationSession) => ConversationSession) {
+    setConversationStore((previous) => ({
+      ...previous,
+      items: previous.items.map((session) => session.id === targetId ? update(session) : session),
+    }));
+  }
+
+  function appendEvent(targetId: string, event: AgentEvent) {
+    updateSession(targetId, (session) => ({ ...session, events: [...session.events, event], updatedAt: Date.now() }));
+  }
+
+  function startNewSession() {
+    if (!live || running) return;
+    const session = createConversationSession();
+    setConversationStore((previous) => ({ items: [session, ...previous.items], activeId: session.id }));
+    setApproval(null);
+    setPrompt('');
+  }
+
+  function switchSession(targetId: string) {
+    if (running || targetId === sessionId) return;
+    setConversationStore((previous) => ({ ...previous, activeId: targetId }));
+    setApproval(null);
+    setPrompt('');
+  }
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -167,7 +202,8 @@ export default function Home() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || '无法切换工作区');
       setStatus(data);
-      setEvents([]);
+      const session = createConversationSession();
+      setConversationStore({ items: [session], activeId: session.id });
       setApproval(null);
       setProjectPickerOpen(false);
       await refreshFiles();
@@ -190,13 +226,19 @@ export default function Home() {
     setPrompt('');
     setRunning(true);
     setConnectionError('');
-    setEvents((previous) => [...previous, { type: 'user', message, timestamp: now() }]);
+    const runSessionId = sessionId;
+    updateSession(runSessionId, (session) => ({
+      ...session,
+      title: session.events.some((item) => item.type === 'user') ? session.title : compact(message, 34),
+      events: [...session.events, { type: 'user', message, timestamp: now() }],
+      updatedAt: Date.now(),
+    }));
     const { api, token } = connection.current;
     try {
       const response = await fetch(`${api}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
-        body: JSON.stringify({ message, session_id: sessionId }),
+        body: JSON.stringify({ message, session_id: runSessionId }),
       });
       if (!response.ok || !response.body) {
         const body = await response.text();
@@ -215,14 +257,14 @@ export default function Home() {
           const item = JSON.parse(line) as AgentEvent;
           item.timestamp = now();
           if (item.type === 'approval_required') setApproval(item);
-          setEvents((previous) => [...previous, item]);
+          appendEvent(runSessionId, item);
         }
         if (done) break;
       }
       await refreshFiles();
     } catch (error) {
       const messageText = error instanceof Error ? error.message : 'Agent 请求失败';
-      setEvents((previous) => [...previous, { type: 'error', error: messageText, timestamp: now() }]);
+      appendEvent(runSessionId, { type: 'error', error: messageText, timestamp: now() });
     } finally {
       setRunning(false);
     }
@@ -236,20 +278,9 @@ export default function Home() {
       headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
       body: JSON.stringify({ decision }),
     });
-    setEvents((previous) => [...previous, { type: 'approval_decision', message: decision, timestamp: now() }]);
+    appendEvent(sessionId, { type: 'approval_decision', message: decision, timestamp: now() });
     setApproval(null);
     if (decision === 'allow_all' && status) setStatus({ ...status, automatic_approval: true });
-  }
-
-  async function clearSession() {
-    if (!live || running) return;
-    const { api, token } = connection.current;
-    await fetch(`${api}/api/clear`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
-      body: JSON.stringify({ session_id: sessionId }),
-    });
-    setEvents([]);
   }
 
   async function undo() {
@@ -261,12 +292,12 @@ export default function Home() {
       body: '{}',
     });
     const result = await response.json();
-    setEvents((previous) => [...previous, {
+    appendEvent(sessionId, {
       type: result.ok ? 'notice' : 'error',
       message: result.ok ? `已恢复 ${result.path}` : undefined,
       error: result.ok ? undefined : result.error,
       timestamp: now(),
-    }]);
+    });
     await refreshFiles();
   }
 
@@ -287,11 +318,11 @@ export default function Home() {
 
       <div className="workbench">
         <aside className="session-rail">
-          <button className="new-session" onClick={clearSession}><span>＋</span> 新建会话</button>
+          <button className="new-session" type="button" onClick={startNewSession} disabled={!live || running}><span>＋</span> 新建会话</button>
           <p className="rail-label">最近任务</p>
           <nav aria-label="最近任务">
-            {(live ? [{ title: currentTitle, time: running ? '运行中' : '当前会话', active: true }] : demoSessions).map((session) => (
-              <button key={session.title} className={`session-item ${session.active ? 'active' : ''}`}>
+            {(live ? conversationStore.items.map((session) => ({ ...session, active: session.id === sessionId, time: session.id === sessionId && running ? '运行中' : sessionTime(session.updatedAt) })) : demoSessions).map((session) => (
+              <button key={'id' in session ? session.id : session.title} type="button" className={`session-item ${session.active ? 'active' : ''}`} onClick={() => 'id' in session && switchSession(session.id)} disabled={live && running}>
                 <span className="session-glyph">{session.active ? '●' : '○'}</span><span className="session-copy"><b>{session.title}</b><small>{session.time}</small></span>{session.active && <span className="more">···</span>}
               </button>
             ))}
@@ -436,6 +467,21 @@ function DemoActivity({ icon, title, detail, meta, warning = false }: { icon: st
 function toolIcon(tool?: string) { return ({ list_files: '⌕', read_file: '≡', search_text: '⌕', write_file: '+', edit_file: '±', make_directory: '□', run_command: '›_' } as Record<string, string>)[tool || ''] || '◆'; }
 function toolLabel(event: AgentEvent) { const args = event.arguments || {}; const path = String(args.path || '.'); return ({ list_files: `浏览 ${path}`, read_file: `读取 ${path}`, search_text: `搜索 “${args.query || ''}”`, write_file: `写入 ${path}`, edit_file: `编辑 ${path}`, make_directory: `创建目录 ${path}`, run_command: `运行 ${compact(String(args.command || ''), 90)}` } as Record<string, string>)[event.tool || ''] || String(event.tool || 'Agent 操作'); }
 function toolDetail(event: AgentEvent) { const args = event.arguments || {}; if (event.tool === 'run_command') return String(args.command || ''); if (args.content_lines) return `${args.content_lines} 行内容`; if (args.old_text_lines || args.new_text_lines) return `替换 ${args.old_text_lines || 0} → ${args.new_text_lines || 0} 行`; return String(args.path || args.query || ''); }
+function createConversationSession(): ConversationSession {
+  return {
+    id: `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`,
+    title: '新会话',
+    events: [],
+    updatedAt: Date.now(),
+  };
+}
+function sessionTime(updatedAt: number) {
+  const elapsed = Math.max(0, Date.now() - updatedAt);
+  if (elapsed < 60_000) return '刚刚';
+  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)} 分钟前`;
+  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)} 小时前`;
+  return new Date(updatedAt).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+}
 function compact(value: string, limit: number) { const normalized = value.replace(/\s+/g, ' ').trim(); return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}…`; }
 function projectName(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) || path; }
 function now() { return new Date().toLocaleTimeString('zh-CN', { hour12: false }); }
