@@ -130,6 +130,28 @@ class WebConsoleTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 409)
         self.assertEqual(self.state.workspace.root, self.root.resolve())
 
+    def test_session_can_be_deleted_without_affecting_other_sessions(self) -> None:
+        self.state.session("first").history = [{"role": "user", "content": "first"}]
+        second = self.state.session("second")
+        second.history = [{"role": "user", "content": "second"}]
+
+        with self.post("/api/sessions/delete", {"session_id": "first"}) as response:
+            payload = json.load(response)
+
+        self.assertTrue(payload["ok"])
+        self.assertNotIn("first", self.state.sessions)
+        self.assertIs(self.state.session("second"), second)
+        self.assertEqual(second.history, [{"role": "user", "content": "second"}])
+
+    def test_running_session_cannot_be_deleted(self) -> None:
+        self.state.session("busy").running = True
+
+        with self.assertRaises(HTTPError) as error:
+            self.post("/api/sessions/delete", {"session_id": "busy"})
+
+        self.assertEqual(error.exception.code, 409)
+        self.assertIn("busy", self.state.sessions)
+
     def test_legacy_recent_project_is_migrated_on_next_start(self) -> None:
         legacy = self.root / "fyk-coding-agent" / "settings.json"
         legacy.parent.mkdir()

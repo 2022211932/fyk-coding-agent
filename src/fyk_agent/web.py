@@ -70,6 +70,18 @@ class WebAgentState:
         with self.sessions_lock:
             return self.sessions.setdefault(session_id, WebSession())
 
+    def delete_session(self, session_id: str) -> bool:
+        with self.state_lock:
+            with self.sessions_lock:
+                session = self.sessions.get(session_id)
+                if session is None:
+                    return True
+                with session.lock:
+                    if session.running:
+                        return False
+                del self.sessions[session_id]
+                return True
+
     def status(self) -> dict[str, Any]:
         with self.state_lock:
             return {
@@ -328,6 +340,11 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                             return
                         session.history = None
                 self._json(200, {"ok": True})
+                return
+            if parsed.path == "/api/sessions/delete":
+                session_id = str(body.get("session_id", "default"))[:100]
+                deleted = state.delete_session(session_id)
+                self._json(200 if deleted else 409, {"ok": deleted, "error": None if deleted else "A task is still running"})
                 return
             self._json(404, {"ok": False, "error": "Not found"})
 

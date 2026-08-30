@@ -38,6 +38,8 @@ type ConversationSession = {
   title: string;
   events: AgentEvent[];
   updatedAt: number;
+  pinned: boolean;
+  archived: boolean;
 };
 type ConversationStore = { items: ConversationSession[]; activeId: string };
 
@@ -63,6 +65,8 @@ export default function Home() {
   const [directory, setDirectory] = useState<DirectoryListing | null>(null);
   const [pickerError, setPickerError] = useState('');
   const [switchingWorkspace, setSwitchingWorkspace] = useState(false);
+  const [openSessionMenu, setOpenSessionMenu] = useState<string | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState<string | null>(null);
   const connection = useRef({ api: '', token: '' });
   const timelineEnd = useRef<HTMLDivElement>(null);
 
@@ -73,6 +77,9 @@ export default function Home() {
   const toolCalls = events.filter((event) => event.type === 'tool_call').length;
   const latestStep = events.reduce((max, event) => Math.max(max, event.step || event.steps || 0), 0);
   const currentTitle = live ? activeSession.title : '修复 slugify 测试';
+  const orderedSessions = [...conversationStore.items].sort((left, right) => Number(right.pinned) - Number(left.pinned) || right.updatedAt - left.updatedAt);
+  const recentSessions = orderedSessions.filter((session) => !session.archived);
+  const archivedSessions = orderedSessions.filter((session) => session.archived);
 
   function updateSession(targetId: string, update: (session: ConversationSession) => ConversationSession) {
     setConversationStore((previous) => ({
@@ -96,8 +103,80 @@ export default function Home() {
   function switchSession(targetId: string) {
     if (running || targetId === sessionId) return;
     setConversationStore((previous) => ({ ...previous, activeId: targetId }));
+    setOpenSessionMenu(null);
+    setDeleteConfirmation(null);
     setApproval(null);
     setPrompt('');
+  }
+
+  function toggleSessionMenu(targetId: string) {
+    setOpenSessionMenu((current) => current === targetId ? null : targetId);
+    setDeleteConfirmation(null);
+  }
+
+  function togglePinned(targetId: string) {
+    updateSession(targetId, (session) => ({ ...session, pinned: !session.pinned }));
+    setOpenSessionMenu(null);
+  }
+
+  function toggleArchived(targetId: string) {
+    setConversationStore((previous) => {
+      const target = previous.items.find((session) => session.id === targetId);
+      if (!target) return previous;
+      const archiving = !target.archived;
+      let items = previous.items.map((session) => session.id === targetId ? { ...session, archived: archiving } : session);
+      let activeId = previous.activeId;
+      if (archiving && activeId === targetId) {
+        const next = items.filter((session) => !session.archived).sort((left, right) => Number(right.pinned) - Number(left.pinned) || right.updatedAt - left.updatedAt)[0];
+        if (next) activeId = next.id;
+        else {
+          const replacement = createConversationSession();
+          items = [replacement, ...items];
+          activeId = replacement.id;
+        }
+      }
+      return { items, activeId };
+    });
+    setOpenSessionMenu(null);
+    setDeleteConfirmation(null);
+    setApproval(null);
+    setPrompt('');
+  }
+
+  async function deleteSession(targetId: string) {
+    if (deleteConfirmation !== targetId) {
+      setDeleteConfirmation(targetId);
+      return;
+    }
+    const { api, token } = connection.current;
+    try {
+      const response = await fetch(`${api}/api/sessions/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
+        body: JSON.stringify({ session_id: targetId }),
+      });
+      if (!response.ok) throw new Error('无法删除该会话');
+      setConversationStore((previous) => {
+        let items = previous.items.filter((session) => session.id !== targetId);
+        let activeId = previous.activeId;
+        if (activeId === targetId) {
+          const next = items.filter((session) => !session.archived).sort((left, right) => Number(right.pinned) - Number(left.pinned) || right.updatedAt - left.updatedAt)[0];
+          if (next) activeId = next.id;
+          else {
+            const replacement = createConversationSession();
+            items = [replacement, ...items];
+            activeId = replacement.id;
+          }
+        }
+        return { items, activeId };
+      });
+      setOpenSessionMenu(null);
+      setDeleteConfirmation(null);
+      setApproval(null);
+      setPrompt('');
+    } catch (error) {
+      setConnectionError(error instanceof Error ? error.message : '无法删除该会话');
+    }
   }
 
   useEffect(() => {
@@ -124,6 +203,27 @@ export default function Home() {
     };
     void connect();
   }, []);
+
+  useEffect(() => {
+    if (!openSessionMenu) return;
+    const closeMenu = (event: MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest('[data-session-menu]')) return;
+      setOpenSessionMenu(null);
+      setDeleteConfirmation(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpenSessionMenu(null);
+        setDeleteConfirmation(null);
+      }
+    };
+    document.addEventListener('mousedown', closeMenu);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeMenu);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [openSessionMenu]);
 
   useEffect(() => {
     timelineEnd.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -321,12 +421,13 @@ export default function Home() {
           <button className="new-session" type="button" onClick={startNewSession} disabled={!live || running}><span>＋</span> 新建会话</button>
           <p className="rail-label">最近任务</p>
           <nav aria-label="最近任务">
-            {(live ? conversationStore.items.map((session) => ({ ...session, active: session.id === sessionId, time: session.id === sessionId && running ? '运行中' : sessionTime(session.updatedAt) })) : demoSessions).map((session) => (
-              <button key={'id' in session ? session.id : session.title} type="button" className={`session-item ${session.active ? 'active' : ''}`} onClick={() => 'id' in session && switchSession(session.id)} disabled={live && running}>
-                <span className="session-glyph">{session.active ? '●' : '○'}</span><span className="session-copy"><b>{session.title}</b><small>{session.time}</small></span>{session.active && <span className="more">···</span>}
+            {live ? recentSessions.map((session) => <SessionListItem key={session.id} session={session} active={session.id === sessionId} running={running} time={session.id === sessionId && running ? '运行中' : sessionTime(session.updatedAt)} menuOpen={openSessionMenu === session.id} confirmingDelete={deleteConfirmation === session.id} onSelect={switchSession} onToggleMenu={toggleSessionMenu} onTogglePinned={togglePinned} onToggleArchived={toggleArchived} onDelete={deleteSession} />) : demoSessions.map((session) => (
+              <button key={session.title} type="button" className={`session-item ${session.active ? 'active' : ''}`}>
+                <span className="session-glyph">{session.active ? '●' : '○'}</span><span className="session-copy"><b>{session.title}</b><small>{session.time}</small></span>
               </button>
             ))}
           </nav>
+          {live && archivedSessions.length > 0 && <><p className="rail-label archived-label">已归档</p><nav aria-label="已归档任务">{archivedSessions.map((session) => <SessionListItem key={session.id} session={session} active={session.id === sessionId} running={running} time={sessionTime(session.updatedAt)} menuOpen={openSessionMenu === session.id} confirmingDelete={deleteConfirmation === session.id} onSelect={switchSession} onToggleMenu={toggleSessionMenu} onTogglePinned={togglePinned} onToggleArchived={toggleArchived} onDelete={deleteSession} />)}</nav></>}
           <div className="rail-bottom"><div><span className="kbd">↶</span><span>撤销修改</span><span className="shortcut">UNDO</span></div><div><span className="kbd">?</span><span>{live ? '本地安全连接' : '演示模式'}</span></div></div>
         </aside>
 
@@ -367,6 +468,33 @@ export default function Home() {
       {projectPickerOpen && <ProjectPicker projects={projects} directory={directory} error={pickerError} switching={switchingWorkspace} onBrowse={browseDirectory} onSelect={selectWorkspace} onClose={() => setProjectPickerOpen(false)} />}
     </main>
   );
+}
+
+function SessionListItem({ session, active, running, time, menuOpen, confirmingDelete, onSelect, onToggleMenu, onTogglePinned, onToggleArchived, onDelete }: {
+  session: ConversationSession;
+  active: boolean;
+  running: boolean;
+  time: string;
+  menuOpen: boolean;
+  confirmingDelete: boolean;
+  onSelect: (id: string) => void;
+  onToggleMenu: (id: string) => void;
+  onTogglePinned: (id: string) => void;
+  onToggleArchived: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  return <div className={`session-row ${active ? 'active' : ''}`} data-session-menu>
+    <button type="button" className="session-item" onClick={() => onSelect(session.id)} disabled={running}>
+      <span className="session-glyph">{session.pinned ? '◆' : active ? '●' : '○'}</span>
+      <span className="session-copy"><b>{session.title}</b><small>{session.pinned ? `已置顶 · ${time}` : time}</small></span>
+    </button>
+    <button type="button" className="session-more" aria-label={`管理会话：${session.title}`} aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => onToggleMenu(session.id)} disabled={running}>···</button>
+    {menuOpen && <div className="session-menu" role="menu">
+      <button type="button" role="menuitem" onClick={() => onTogglePinned(session.id)}><span>◆</span>{session.pinned ? '取消置顶' : '置顶'}</button>
+      <button type="button" role="menuitem" onClick={() => onToggleArchived(session.id)}><span>▣</span>{session.archived ? '取消归档' : '归档'}</button>
+      <button type="button" role="menuitem" className={`delete ${confirmingDelete ? 'confirming' : ''}`} onClick={() => onDelete(session.id)}><span>×</span>{confirmingDelete ? '再次点击确认' : '删除'}</button>
+    </div>}
+  </div>;
 }
 
 function LiveTimeline({ events, running }: { events: AgentEvent[]; running: boolean }) {
@@ -473,6 +601,8 @@ function createConversationSession(): ConversationSession {
     title: '新会话',
     events: [],
     updatedAt: Date.now(),
+    pinned: false,
+    archived: false,
   };
 }
 function sessionTime(updatedAt: number) {

@@ -50,16 +50,27 @@ button { color: inherit; }
 .new-session:disabled:hover { border-color: #2c3b46; background: #141d25; }
 .new-session span { color: var(--mint); font-size: 16px; margin-right: 6px; }
 .rail-label { color: var(--faint); font-size: 9px; letter-spacing: .14em; font-weight: 700; margin: 24px 10px 9px; }
-.session-item { width: 100%; border: 0; background: transparent; display: grid; grid-template-columns: 16px 1fr auto; text-align: left; gap: 7px; padding: 10px 9px; border-radius: 8px; cursor: pointer; color: var(--muted); }
+.session-row { position: relative; border-radius: 8px; }
+.session-item { width: 100%; border: 0; background: transparent; display: grid; grid-template-columns: 16px 1fr; text-align: left; gap: 7px; padding: 10px 34px 10px 9px; border-radius: 8px; cursor: pointer; color: var(--muted); }
 .session-item:hover { background: #111820; }
 .session-item:disabled { cursor: default; }
-.session-item.active { color: var(--text); background: linear-gradient(90deg, rgba(100,230,194,.11), rgba(100,230,194,.025)); box-shadow: inset 2px 0 var(--mint); }
+.session-row.active .session-item { color: var(--text); background: linear-gradient(90deg, rgba(100,230,194,.11), rgba(100,230,194,.025)); box-shadow: inset 2px 0 var(--mint); }
 .session-glyph { color: var(--faint); font-size: 9px; padding-top: 3px; }
-.session-item.active .session-glyph { color: var(--mint); }
+.session-row.active .session-glyph { color: var(--mint); }
 .session-copy { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .session-copy b { font-size: 11px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-copy small { font-size: 9px; color: var(--faint); }
-.more { color: var(--faint); }
+.session-more { position: absolute; z-index: 2; right: 5px; top: 50%; transform: translateY(-50%); width: 27px; height: 27px; border: 0; border-radius: 6px; background: transparent; color: var(--faint); cursor: pointer; opacity: 0; transition: .15s ease; }
+.session-row:hover .session-more, .session-row.active .session-more, .session-more[aria-expanded="true"] { opacity: 1; }
+.session-more:hover:not(:disabled), .session-more[aria-expanded="true"] { color: var(--mint); background: rgba(100,230,194,.09); }
+.session-more:disabled { cursor: default; }
+.session-menu { position: absolute; z-index: 40; right: 5px; top: calc(50% + 19px); width: 132px; display: grid; gap: 2px; padding: 5px; border: 1px solid #2a3741; border-radius: 9px; background: #121920; box-shadow: 0 16px 38px rgba(0,0,0,.48); animation: menu-in .12s ease-out; }
+.session-menu button { display: grid; grid-template-columns: 17px 1fr; gap: 6px; align-items: center; border: 0; border-radius: 6px; padding: 7px 8px; background: transparent; color: #aeb9bf; text-align: left; font-size: 9px; cursor: pointer; }
+.session-menu button:hover { color: var(--text); background: #1a232c; }
+.session-menu button > span { color: var(--faint); text-align: center; }
+.session-menu button.delete { color: #e79791; }
+.session-menu button.delete:hover, .session-menu button.delete.confirming { color: #ffc0bb; background: rgba(255,120,109,.1); }
+.archived-label { margin-top: 15px; }
 .rail-bottom { margin-top: auto; border-top: 1px solid var(--line-soft); padding: 12px 5px 0; display: grid; gap: 5px; }
 .rail-bottom > div { display: grid; grid-template-columns: 21px 1fr auto; align-items: center; color: var(--faint); font-size: 10px; padding: 6px; }
 .kbd { width: 18px; height: 18px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); }
@@ -221,6 +232,7 @@ kbd { font: 7px ui-monospace, monospace; border: 1px solid #2b3640; border-botto
 @keyframes pulse { 70% { box-shadow: 0 0 0 7px rgba(100,230,194,0); } 100% { box-shadow: 0 0 0 0 rgba(100,230,194,0); } }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes modal-in { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: none; } }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: none; } }
 
 .inspector { border-left: 1px solid var(--line); padding: 18px 16px; position: sticky; top: 62px; height: calc(100vh - 62px); overflow-y: auto; }
 .inspector-section { padding: 1px 0 18px; border-bottom: 1px solid var(--line-soft); margin-bottom: 18px; }
