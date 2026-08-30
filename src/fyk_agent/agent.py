@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import queue
+import threading
 from typing import Any, Callable, Protocol
 
 from .client import AssistantReply
-from .context import ContextManager
+from .context import ContextManager, message_size
 from .events import EventLog
 from .tools import ToolRegistry
 
@@ -45,6 +47,10 @@ class RunResult:
     context_compactions: int
 
 
+class RunCancelled(RuntimeError):
+    pass
+
+
 class CodingAgent:
     def __init__(
         self,
@@ -54,6 +60,7 @@ class CodingAgent:
         max_steps: int = 30,
         max_context_chars: int = 800_000,
         notify: Callable[[str, dict[str, Any]], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ):
         self.client = client
         self.tools = tools
@@ -61,6 +68,8 @@ class CodingAgent:
         self.context = ContextManager(max_context_chars)
         self.events = EventLog(tools.workspace.root)
         self.notify = notify or (lambda _kind, _data: None)
+        self._supports_cancellation = cancelled is not None
+        self.cancelled = cancelled or (lambda: False)
 
     def run(
         self,
@@ -85,13 +94,20 @@ class CodingAgent:
             max_steps=self.max_steps,
             continued=history is not None,
         )
+        self._notify_context(messages, step=0)
 
         for step in range(1, self.max_steps + 1):
+            if self.cancelled():
+                return self._cancelled_result(messages, step - 1)
             self.notify("model_request", {"step": step, "message_count": len(messages)})
             self.events.emit("model_request", step=step, message_count=len(messages))
-            reply = self.client.complete(messages, self.tools.schemas)
+            try:
+                reply = self._complete_with_cancellation(messages)
+            except RunCancelled:
+                return self._cancelled_result(messages, step - 1)
             assistant_message = _assistant_message(reply)
             messages.append(assistant_message)
+            self._notify_context(messages, step=step)
             self.events.emit(
                 "model_reply",
                 step=step,
@@ -112,6 +128,8 @@ class CodingAgent:
                 )
 
             for call in reply.tool_calls:
+                if self.cancelled():
+                    return self._cancelled_result(messages, step)
                 call_id, name, arguments, parse_error = _parse_tool_call(call)
                 self.notify(
                     "tool_call",
@@ -142,6 +160,8 @@ class CodingAgent:
                         "result": result,
                     },
                 )
+                if self.cancelled():
+                    return self._cancelled_result(messages, step)
 
             previous_count = self.context.compactions
             messages = self.context.compact(messages)
@@ -152,6 +172,7 @@ class CodingAgent:
                     message_count=len(messages),
                     total_compactions=self.context.compactions,
                 )
+            self._notify_context(messages, step=step)
 
         final_text = (
             f"Stopped after reaching the configured limit of {self.max_steps} model steps. "
@@ -163,6 +184,61 @@ class CodingAgent:
             final_text,
             self.max_steps,
             "step_limit",
+            messages,
+            self.context.compactions,
+        )
+
+    def _complete_with_cancellation(
+        self, messages: list[dict[str, Any]]
+    ) -> AssistantReply:
+        if not self._supports_cancellation:
+            return self.client.complete(messages, self.tools.schemas)
+        if self.cancelled():
+            raise RunCancelled
+        outcomes: queue.Queue[AssistantReply | Exception] = queue.Queue(maxsize=1)
+
+        def complete() -> None:
+            try:
+                outcomes.put(self.client.complete(messages, self.tools.schemas))
+            except Exception as exc:  # Preserve the model client's original error.
+                outcomes.put(exc)
+
+        worker = threading.Thread(target=complete, name="yukai-model-request", daemon=True)
+        worker.start()
+        while True:
+            if self.cancelled():
+                raise RunCancelled
+            try:
+                outcome = outcomes.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    def _notify_context(self, messages: list[dict[str, Any]], *, step: int) -> None:
+        self.notify(
+            "context_stats",
+            {
+                "step": step,
+                "context_chars": sum(message_size(message) for message in messages),
+                "message_count": len(messages),
+                "context_compactions": self.context.compactions,
+                "max_context_chars": self.context.max_chars,
+            },
+        )
+
+    def _cancelled_result(
+        self, messages: list[dict[str, Any]], steps: int
+    ) -> RunResult:
+        final_text = "任务已由用户停止。已经完成的文件修改会保留，可在 Diff 中查看。"
+        self.events.emit("run_finished", reason="cancelled", steps=steps)
+        self.notify("finished", {"step": steps, "reason": "cancelled"})
+        self._notify_context(messages, step=steps)
+        return RunResult(
+            final_text,
+            steps,
+            "cancelled",
             messages,
             self.context.compactions,
         )

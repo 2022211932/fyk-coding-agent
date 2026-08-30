@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from fyk_agent.config import Settings
+from fyk_agent.tools import ToolRegistry
 from fyk_agent.web import (
     PendingApproval,
     WebAgentState,
@@ -142,6 +143,60 @@ class WebConsoleTests(unittest.TestCase):
         self.assertNotIn("first", self.state.sessions)
         self.assertIs(self.state.session("second"), second)
         self.assertEqual(second.history, [{"role": "user", "content": "second"}])
+
+    def test_sessions_survive_state_restart(self) -> None:
+        self.state.update_session("saved", title="持久化测试", pinned=True)
+        self.state.append_session_event("saved", {"type": "user", "message": "hello"})
+        history = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "hello"},
+        ]
+        self.state.save_session_history("saved", history, context_compactions=2)
+
+        restored = WebAgentState(
+            self.state.settings,
+            Workspace(self.root),
+            "new-token",
+            3000,
+            False,
+            config_path=self.config_path,
+        )
+        session = restored.session("saved")
+        self.assertEqual(session.title, "持久化测试")
+        self.assertTrue(session.pinned)
+        self.assertEqual(session.history, history)
+        self.assertEqual(session.events[0]["message"], "hello")
+        self.assertEqual(session.context_compactions, 2)
+
+    def test_sessions_endpoint_returns_real_context_size(self) -> None:
+        history = [{"role": "system", "content": "system"}]
+        self.state.save_session_history("stats", history, context_compactions=1)
+        with self.request("/api/sessions") as response:
+            payload = json.load(response)
+        session = next(item for item in payload["sessions"] if item["id"] == "stats")
+        self.assertEqual(session["message_count"], 1)
+        self.assertGreater(session["context_chars"], 0)
+        self.assertEqual(session["context_compactions"], 1)
+
+    def test_running_session_can_be_stopped(self) -> None:
+        session = self.state.session("busy")
+        session.running = True
+        with self.post("/api/sessions/cancel", {"session_id": "busy"}) as response:
+            payload = json.load(response)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(session.cancel_event.is_set())
+
+    def test_diff_endpoint_uses_snapshot_and_path(self) -> None:
+        registry = ToolRegistry(Workspace(self.root), approve=lambda _name, _args: True)
+        changed = registry.execute(
+            "edit_file",
+            {"path": "main.py", "old_text": "hello", "new_text": "changed"},
+        )
+        query = urlencode({"snapshot_id": changed["snapshot_id"], "path": "main.py"})
+        with self.request(f"/api/diff?{query}") as response:
+            payload = json.load(response)
+        self.assertIn("-print('hello')", payload["diff"])
+        self.assertIn("+print('changed')", payload["diff"])
 
     def test_running_session_cannot_be_deleted(self) -> None:
         self.state.session("busy").running = True

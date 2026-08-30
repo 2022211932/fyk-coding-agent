@@ -21,6 +21,7 @@ from . import __version__
 from .agent import CodingAgent
 from .client import ModelError, OpenAICompatibleClient
 from .config import Settings
+from .context import message_size
 from .tools import ToolRegistry
 from .workspace import Workspace
 
@@ -29,12 +30,20 @@ from .workspace import Workspace
 class PendingApproval:
     event: threading.Event = field(default_factory=threading.Event)
     decision: str = "reject"
+    session_id: str = ""
 
 
 @dataclass
 class WebSession:
     history: list[dict[str, Any]] | None = None
+    title: str = "新会话"
+    events: list[dict[str, Any]] = field(default_factory=list)
+    pinned: bool = False
+    archived: bool = False
+    updated_at: float = field(default_factory=lambda: time.time() * 1000)
+    context_compactions: int = 0
     running: bool = False
+    cancel_event: threading.Event = field(default_factory=threading.Event)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -55,7 +64,7 @@ class WebAgentState:
         self.automatic_approval = automatic_approval
         self.config_path = config_path or _default_config_path()
         self.state_lock = threading.RLock()
-        self.sessions: dict[str, WebSession] = {}
+        self.sessions: dict[str, WebSession] = _load_web_sessions(workspace)
         self.sessions_lock = threading.Lock()
         self.approvals: dict[str, PendingApproval] = {}
         self.approvals_lock = threading.Lock()
@@ -80,7 +89,139 @@ class WebAgentState:
                     if session.running:
                         return False
                 del self.sessions[session_id]
+                self._persist_sessions_locked()
                 return True
+
+    def sessions_payload(self) -> dict[str, Any]:
+        with self.state_lock:
+            with self.sessions_lock:
+                sessions = [
+                    {
+                        "id": session_id,
+                        "title": session.title,
+                        "events": session.events,
+                        "pinned": session.pinned,
+                        "archived": session.archived,
+                        "updated_at": session.updated_at,
+                        "context_chars": sum(message_size(message) for message in session.history or []),
+                        "message_count": len(session.history or []),
+                        "context_compactions": session.context_compactions,
+                    }
+                    for session_id, session in self.sessions.items()
+                ]
+                sessions.sort(key=lambda item: float(item["updated_at"]), reverse=True)
+                return {"ok": True, "sessions": sessions}
+
+    def update_session(
+        self,
+        session_id: str,
+        *,
+        title: str | None = None,
+        pinned: bool | None = None,
+        archived: bool | None = None,
+    ) -> WebSession:
+        with self.state_lock:
+            with self.sessions_lock:
+                session = self.sessions.setdefault(session_id, WebSession())
+                if title is not None:
+                    session.title = title.strip()[:100] or "新会话"
+                if pinned is not None:
+                    session.pinned = pinned
+                if archived is not None:
+                    session.archived = archived
+                session.updated_at = time.time() * 1000
+                self._persist_sessions_locked()
+                return session
+
+    def append_session_event(self, session_id: str, event: dict[str, Any]) -> None:
+        with self.state_lock:
+            with self.sessions_lock:
+                session = self.sessions.setdefault(session_id, WebSession())
+                record = dict(event)
+                record.setdefault("timestamp", time.strftime("%H:%M:%S"))
+                session.events.append(record)
+                session.events = session.events[-2000:]
+                session.updated_at = time.time() * 1000
+                self._persist_sessions_locked()
+
+    def save_session_history(
+        self,
+        session_id: str,
+        history: list[dict[str, Any]],
+        *,
+        context_compactions: int,
+    ) -> None:
+        with self.state_lock:
+            with self.sessions_lock:
+                session = self.sessions.setdefault(session_id, WebSession())
+                session.history = history
+                session.context_compactions = context_compactions
+                session.updated_at = time.time() * 1000
+                self._persist_sessions_locked()
+
+    def clear_session(self, session_id: str) -> bool:
+        with self.state_lock:
+            with self.sessions_lock:
+                session = self.sessions.setdefault(session_id, WebSession())
+                with session.lock:
+                    if session.running:
+                        return False
+                    session.history = None
+                    session.events = []
+                    session.context_compactions = 0
+                    session.updated_at = time.time() * 1000
+                self._persist_sessions_locked()
+                return True
+
+    def cancel_session(self, session_id: str) -> bool:
+        with self.state_lock:
+            with self.sessions_lock:
+                session = self.sessions.get(session_id)
+                if session is None:
+                    return False
+                with session.lock:
+                    if not session.running:
+                        return False
+                    session.cancel_event.set()
+        with self.approvals_lock:
+            for pending in self.approvals.values():
+                if pending.session_id == session_id:
+                    pending.decision = "reject"
+                    pending.event.set()
+        return True
+
+    def _persist_sessions_locked(self) -> None:
+        path = self.workspace.root / ".yukai" / "web_sessions.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "sessions": [
+                {
+                    "id": session_id,
+                    "title": session.title,
+                    "history": session.history,
+                    "events": session.events,
+                    "pinned": session.pinned,
+                    "archived": session.archived,
+                    "updated_at": session.updated_at,
+                    "context_compactions": session.context_compactions,
+                }
+                for session_id, session in sorted(
+                    self.sessions.items(), key=lambda item: item[1].updated_at, reverse=True
+                )[:50]
+            ],
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="", dir=path.parent, delete=False
+        ) as handle:
+            json.dump(payload, handle, ensure_ascii=True, default=str)
+            handle.write("\n")
+            temporary = Path(handle.name)
+        try:
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
     def status(self) -> dict[str, Any]:
         with self.state_lock:
@@ -90,6 +231,7 @@ class WebAgentState:
                 "model": self.settings.model,
                 "workspace": str(self.workspace.root),
                 "automatic_approval": self.automatic_approval,
+                "max_context_chars": self.settings.max_context_chars,
             }
 
     def set_automatic_approval(self, enabled: bool) -> dict[str, Any]:
@@ -107,7 +249,7 @@ class WebAgentState:
                 if any(session.running for session in self.sessions.values()):
                     return False, {"ok": False, "error": "任务运行时不能切换工作区"}
                 self.workspace = selected
-                self.sessions.clear()
+                self.sessions = _load_web_sessions(selected)
             result = self.status()
             try:
                 _remember_workspace(selected.root, self.config_path)
@@ -153,13 +295,14 @@ class WebAgentState:
         arguments: dict[str, Any],
         emit: Callable[[str, dict[str, Any]], None],
         *,
+        session_id: str = "default",
         force_manual: bool = False,
         risk_reason: str = "",
     ) -> bool:
         if self.automatic_approval and not force_manual:
             return True
         approval_id = secrets.token_urlsafe(12)
-        pending = PendingApproval()
+        pending = PendingApproval(session_id=session_id)
         with self.approvals_lock:
             self.approvals[approval_id] = pending
         emit(
@@ -182,13 +325,21 @@ class WebAgentState:
         return pending.decision == "allow"
 
     def resolve_approval(self, approval_id: str, decision: str) -> bool:
+        session_id = ""
         with self.approvals_lock:
             pending = self.approvals.get(approval_id)
             if pending is None:
                 return False
             pending.decision = decision
+            session_id = pending.session_id
             pending.event.set()
-            return True
+        if session_id:
+            labels = {"allow": "已允许一次", "allow_all": "已开启自动审批", "reject": "已拒绝"}
+            self.append_session_event(
+                session_id,
+                {"type": "approval_decision", "message": labels[decision]},
+            )
+        return True
 
 
 def run_web_console(
@@ -280,6 +431,9 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
             if parsed.path == "/api/status":
                 self._json(200, state.status())
                 return
+            if parsed.path == "/api/sessions":
+                self._json(200, state.sessions_payload())
+                return
             if parsed.path == "/api/projects":
                 self._json(200, state.projects())
                 return
@@ -298,6 +452,21 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                     workspace = state.workspace
                 registry = ToolRegistry(workspace)
                 self._json(200, registry.execute("list_files", {"path": path, "max_results": 300}))
+                return
+            if parsed.path == "/api/diff":
+                query = parse_qs(parsed.query)
+                snapshot_id = query.get("snapshot_id", [""])[0]
+                path = query.get("path", [""])[0]
+                if not snapshot_id or not path:
+                    self._json(400, {"ok": False, "error": "snapshot_id and path are required"})
+                    return
+                try:
+                    with state.state_lock:
+                        workspace = state.workspace
+                    result = ToolRegistry(workspace).journal.unified_diff(snapshot_id, path)
+                    self._json(200, result)
+                except (ValueError, OSError) as exc:
+                    self._json(404, {"ok": False, "error": str(exc)})
                 return
             self._json(404, {"ok": False, "error": "Not found"})
 
@@ -326,6 +495,26 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                 selected, result = state.select_workspace(path)
                 self._json(200 if selected else 409, result)
                 return
+            if parsed.path == "/api/sessions/update":
+                session_id = str(body.get("session_id", ""))[:100]
+                if not session_id:
+                    self._json(400, {"ok": False, "error": "session_id is required"})
+                    return
+                title = body.get("title")
+                pinned = body.get("pinned")
+                archived = body.get("archived")
+                if title is not None and not isinstance(title, str):
+                    self._json(400, {"ok": False, "error": "title must be a string"})
+                    return
+                if pinned is not None and not isinstance(pinned, bool):
+                    self._json(400, {"ok": False, "error": "pinned must be boolean"})
+                    return
+                if archived is not None and not isinstance(archived, bool):
+                    self._json(400, {"ok": False, "error": "archived must be boolean"})
+                    return
+                state.update_session(session_id, title=title, pinned=pinned, archived=archived)
+                self._json(200, {"ok": True})
+                return
             approval_match = re.fullmatch(r"/api/approvals/([A-Za-z0-9_-]+)", parsed.path)
             if approval_match:
                 decision = str(body.get("decision", "reject"))
@@ -338,23 +527,35 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
             if parsed.path == "/api/undo":
                 with state.state_lock:
                     workspace = state.workspace
-                self._json(200, ToolRegistry(workspace).undo_last())
+                result = ToolRegistry(workspace).undo_last()
+                session_id = str(body.get("session_id", "default"))[:100]
+                state.append_session_event(
+                    session_id,
+                    {
+                        "type": "notice" if result.get("ok") else "error",
+                        "message": f"已恢复 {result['path']}" if result.get("ok") else None,
+                        "error": None if result.get("ok") else result.get("error"),
+                    },
+                )
+                self._json(200, result)
                 return
             if parsed.path == "/api/clear":
                 session_id = str(body.get("session_id", "default"))[:100]
-                with state.state_lock:
-                    session = state.session(session_id)
-                    with session.lock:
-                        if session.running:
-                            self._json(409, {"ok": False, "error": "A task is still running"})
-                            return
-                        session.history = None
-                self._json(200, {"ok": True})
+                cleared = state.clear_session(session_id)
+                self._json(
+                    200 if cleared else 409,
+                    {"ok": cleared, "error": None if cleared else "A task is still running"},
+                )
                 return
             if parsed.path == "/api/sessions/delete":
                 session_id = str(body.get("session_id", "default"))[:100]
                 deleted = state.delete_session(session_id)
                 self._json(200 if deleted else 409, {"ok": deleted, "error": None if deleted else "A task is still running"})
+                return
+            if parsed.path == "/api/sessions/cancel":
+                session_id = str(body.get("session_id", "default"))[:100]
+                cancelled = state.cancel_session(session_id)
+                self._json(200 if cancelled else 409, {"ok": cancelled})
                 return
             self._json(404, {"ok": False, "error": "Not found"})
 
@@ -371,7 +572,15 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                         self._json(409, {"ok": False, "error": "This session already has a running task"})
                         return
                     session.running = True
+                    session.cancel_event.clear()
                 workspace = state.workspace
+
+            if session.title == "新会话":
+                state.update_session(session_id, title=_compact_title(message))
+            state.append_session_event(
+                session_id,
+                {"type": "user", "message": message, "timestamp": time.strftime("%H:%M:%S")},
+            )
 
             self.send_response(200)
             self._cors_headers()
@@ -383,6 +592,10 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
 
             def emit(kind: str, data: dict[str, Any]) -> None:
                 payload = _safe_web_event(kind, data)
+                state.append_session_event(
+                    session_id,
+                    {"type": kind, **payload, "timestamp": time.strftime("%H:%M:%S")},
+                )
                 self.wfile.write(
                     (json.dumps({"type": kind, **payload}, ensure_ascii=False, default=str) + "\n").encode(
                         "utf-8", errors="replace"
@@ -392,14 +605,18 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
 
             registry = ToolRegistry(
                 workspace,
-                approve=lambda name, arguments: state.request_approval(name, arguments, emit),
+                approve=lambda name, arguments: state.request_approval(
+                    name, arguments, emit, session_id=session_id
+                ),
                 approve_risky=lambda name, arguments, reason: state.request_approval(
                     name,
                     arguments,
                     emit,
+                    session_id=session_id,
                     force_manual=True,
                     risk_reason=reason,
                 ),
+                cancelled=session.cancel_event.is_set,
             )
             agent = CodingAgent(
                 OpenAICompatibleClient(state.settings),
@@ -407,11 +624,17 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                 max_steps=state.settings.max_steps,
                 max_context_chars=state.settings.max_context_chars,
                 notify=emit,
+                cancelled=session.cancel_event.is_set,
             )
+            agent.context.compactions = session.context_compactions
             try:
                 emit("run_started", {"message": message})
                 result = agent.run(message, history=session.history)
-                session.history = result.messages
+                state.save_session_history(
+                    session_id,
+                    result.messages,
+                    context_compactions=result.context_compactions,
+                )
                 emit(
                     "final",
                     {
@@ -419,6 +642,9 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                         "steps": result.steps,
                         "stop_reason": result.stop_reason,
                         "compactions": result.context_compactions,
+                        "context_compactions": session.context_compactions,
+                        "context_chars": sum(message_size(message) for message in result.messages),
+                        "message_count": len(result.messages),
                     },
                 )
             except (ModelError, ValueError, RuntimeError) as exc:
@@ -494,6 +720,54 @@ def _safe_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         else:
             safe[key] = value
     return safe
+
+
+def _load_web_sessions(workspace: Workspace) -> dict[str, WebSession]:
+    path = workspace.root / ".yukai" / "web_sessions.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    raw_sessions = payload.get("sessions", []) if isinstance(payload, dict) else []
+    sessions: dict[str, WebSession] = {}
+    for raw in raw_sessions[:50] if isinstance(raw_sessions, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        session_id = str(raw.get("id", ""))[:100]
+        if not session_id:
+            continue
+        raw_history = raw.get("history")
+        history = (
+            [dict(message) for message in raw_history if isinstance(message, dict)]
+            if isinstance(raw_history, list)
+            else None
+        )
+        raw_events = raw.get("events", [])
+        events = (
+            [dict(event) for event in raw_events[-2000:] if isinstance(event, dict)]
+            if isinstance(raw_events, list)
+            else []
+        )
+        try:
+            updated_at = float(raw.get("updated_at", time.time() * 1000))
+            context_compactions = max(0, int(raw.get("context_compactions", 0)))
+        except (TypeError, ValueError):
+            continue
+        sessions[session_id] = WebSession(
+            history=history,
+            title=str(raw.get("title", "新会话"))[:100] or "新会话",
+            events=events,
+            pinned=bool(raw.get("pinned", False)),
+            archived=bool(raw.get("archived", False)),
+            updated_at=updated_at,
+            context_compactions=context_compactions,
+        )
+    return sessions
+
+
+def _compact_title(message: str, limit: int = 34) -> str:
+    normalized = " ".join(message.split())
+    return normalized if len(normalized) <= limit else normalized[: limit - 1] + "…"
 
 
 def _default_config_path() -> Path:

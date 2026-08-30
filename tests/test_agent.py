@@ -1,5 +1,7 @@
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 
 from fyk_agent.agent import CodingAgent
@@ -18,6 +20,16 @@ class FakeClient:
         if not self.replies:
             raise AssertionError("Fake client received more calls than expected")
         return self.replies.pop(0)
+
+
+class SlowClient:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+
+    def complete(self, messages: list[dict], tools: list[dict]) -> AssistantReply:
+        self.started.set()
+        time.sleep(2)
+        return AssistantReply("too late", [], {"role": "assistant", "content": "too late"})
 
 
 def tool_reply(arguments: str = '{"path":"."}') -> AssistantReply:
@@ -92,6 +104,37 @@ class AgentLoopTests(unittest.TestCase):
         agent.context.compactions = 4
         agent.clear_context()
         self.assertEqual(agent.context.compactions, 0)
+
+    def test_reports_real_context_statistics(self) -> None:
+        events: list[tuple[str, dict]] = []
+        client = FakeClient([AssistantReply("Done", [], {"role": "assistant", "content": "Done"})])
+        result = CodingAgent(
+            client,
+            self.registry,
+            max_context_chars=12_345,
+            notify=lambda kind, data: events.append((kind, data)),
+        ).run("Measure this conversation")
+        context_events = [data for kind, data in events if kind == "context_stats"]
+        self.assertGreaterEqual(len(context_events), 2)
+        self.assertEqual(context_events[-1]["message_count"], len(result.messages))
+        self.assertEqual(context_events[-1]["max_context_chars"], 12_345)
+        self.assertGreater(context_events[-1]["context_chars"], 0)
+
+    def test_model_wait_can_be_cancelled(self) -> None:
+        cancelled = threading.Event()
+        client = SlowClient()
+        results = []
+        worker = threading.Thread(
+            target=lambda: results.append(
+                CodingAgent(client, self.registry, cancelled=cancelled.is_set).run("Wait")
+            )
+        )
+        worker.start()
+        self.assertTrue(client.started.wait(timeout=1))
+        cancelled.set()
+        worker.join(timeout=1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results[0].stop_reason, "cancelled")
 
 
 if __name__ == "__main__":

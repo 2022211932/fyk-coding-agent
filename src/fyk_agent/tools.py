@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import tempfile
 import time
@@ -56,12 +57,14 @@ class ToolRegistry:
         workspace: Workspace,
         approve: Callable[[str, dict[str, Any]], bool] | None = None,
         approve_risky: Callable[[str, dict[str, Any], str], bool] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ):
         self.workspace = workspace
         self.journal = ChangeJournal(workspace.root)
         self.events = EventLog(workspace.root)
         self.approve = approve or (lambda _name, _arguments: True)
         self.approve_risky = approve_risky or (lambda _name, _arguments, _reason: False)
+        self.cancelled = cancelled or (lambda: False)
         self._specs = self._build_specs()
 
     @property
@@ -70,6 +73,8 @@ class ToolRegistry:
 
     def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
+        if self.cancelled():
+            return _failure("Task was stopped", error_type="cancelled", cancelled=True)
         spec = self._specs.get(name)
         if spec is None:
             result = _failure(f"Unknown tool: {name}", error_type="unknown_tool")
@@ -388,8 +393,12 @@ class ToolRegistry:
             )
         else:
             shell_command = ["/bin/sh", "-c", command]
-        try:
-            completed = subprocess.run(
+        creation_options: dict[str, Any] = {}
+        if os.name == "nt":
+            creation_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            creation_options["start_new_session"] = True
+        process = subprocess.Popen(
                 shell_command,
                 cwd=working_directory,
                 env=environment,
@@ -397,34 +406,50 @@ class ToolRegistry:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                capture_output=True,
-                timeout=timeout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                **creation_options,
             )
-            stdout, stdout_truncated = _truncate(completed.stdout, MAX_COMMAND_OUTPUT)
-            stderr, stderr_truncated = _truncate(completed.stderr, MAX_COMMAND_OUTPUT)
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.cancelled():
+                _terminate_process_tree(process)
+                stdout, stderr = process.communicate()
+                return _command_interrupted_result(
+                    command,
+                    self.workspace.relative(working_directory),
+                    stdout,
+                    stderr,
+                    cancelled=True,
+                    error="Task was stopped by the user",
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_process_tree(process)
+                stdout, stderr = process.communicate()
+                return _command_interrupted_result(
+                    command,
+                    self.workspace.relative(working_directory),
+                    stdout,
+                    stderr,
+                    cancelled=False,
+                    error=f"Command exceeded {timeout} seconds",
+                )
+            try:
+                stdout_text, stderr_text = process.communicate(timeout=min(0.2, remaining))
+            except subprocess.TimeoutExpired:
+                continue
+            stdout, stdout_truncated = _truncate(stdout_text, MAX_COMMAND_OUTPUT)
+            stderr, stderr_truncated = _truncate(stderr_text, MAX_COMMAND_OUTPUT)
             return {
-                "ok": completed.returncode == 0,
+                "ok": process.returncode == 0,
                 "command": command,
                 "cwd": self.workspace.relative(working_directory),
-                "exit_code": completed.returncode,
+                "exit_code": process.returncode,
                 "stdout": stdout,
                 "stderr": stderr,
                 "output_truncated": stdout_truncated or stderr_truncated,
                 "timed_out": False,
-            }
-        except subprocess.TimeoutExpired as exc:
-            stdout = _decode_timeout_output(exc.stdout)
-            stderr = _decode_timeout_output(exc.stderr)
-            return {
-                "ok": False,
-                "command": command,
-                "cwd": self.workspace.relative(working_directory),
-                "exit_code": None,
-                "stdout": _truncate(stdout, MAX_COMMAND_OUTPUT)[0],
-                "stderr": _truncate(stderr, MAX_COMMAND_OUTPUT)[0],
-                "output_truncated": len(stdout) > MAX_COMMAND_OUTPUT or len(stderr) > MAX_COMMAND_OUTPUT,
-                "timed_out": True,
-                "error": f"Command exceeded {timeout} seconds",
             }
 
 
@@ -512,8 +537,57 @@ def _atomic_write_text(path: Path, content: str) -> None:
             temporary.unlink()
 
 
-def _failure(message: str, *, error_type: str) -> dict[str, Any]:
-    return {"ok": False, "error": message, "error_type": error_type}
+def _failure(message: str, *, error_type: str, **details: Any) -> dict[str, Any]:
+    return {"ok": False, "error": message, "error_type": error_type, **details}
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=2)
+
+
+def _command_interrupted_result(
+    command: str,
+    cwd: str,
+    stdout: str,
+    stderr: str,
+    *,
+    cancelled: bool,
+    error: str,
+) -> dict[str, Any]:
+    safe_stdout, stdout_truncated = _truncate(stdout, MAX_COMMAND_OUTPUT)
+    safe_stderr, stderr_truncated = _truncate(stderr, MAX_COMMAND_OUTPUT)
+    return {
+        "ok": False,
+        "command": command,
+        "cwd": cwd,
+        "exit_code": None,
+        "stdout": safe_stdout,
+        "stderr": safe_stderr,
+        "output_truncated": stdout_truncated or stderr_truncated,
+        "timed_out": not cancelled,
+        "cancelled": cancelled,
+        "error_type": "cancelled" if cancelled else "timeout",
+        "error": error,
+    }
 
 
 def _truncate(value: str, limit: int) -> tuple[str, bool]:
@@ -521,14 +595,6 @@ def _truncate(value: str, limit: int) -> tuple[str, bool]:
         return value, False
     half = limit // 2
     return value[:half] + "\n... output truncated ...\n" + value[-half:], True
-
-
-def _decode_timeout_output(value: bytes | str | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
 
 
 def _result_summary(result: dict[str, Any]) -> str:

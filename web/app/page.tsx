@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 
 type AgentEvent = {
   type: string;
@@ -18,6 +18,10 @@ type AgentEvent = {
   force_manual?: boolean;
   risk_reason?: string;
   timestamp?: string;
+  context_chars?: number;
+  message_count?: number;
+  context_compactions?: number;
+  max_context_chars?: number;
 };
 
 type Status = {
@@ -25,6 +29,7 @@ type Status = {
   model: string;
   workspace: string;
   automatic_approval: boolean;
+  max_context_chars: number;
 };
 
 type FileEntry = { path: string; type: string; size?: number };
@@ -42,8 +47,12 @@ type ConversationSession = {
   updatedAt: number;
   pinned: boolean;
   archived: boolean;
+  contextChars: number;
+  messageCount: number;
+  contextCompactions: number;
 };
 type ConversationStore = { items: ConversationSession[]; activeId: string };
+type DiffView = { path: string; diff: string; truncated: boolean };
 
 const demoSessions = [
   { title: '修复 slugify 测试', time: '刚刚', active: true },
@@ -60,6 +69,7 @@ export default function Home() {
   const [status, setStatus] = useState<Status | null>(null);
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [running, setRunning] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [connectionError, setConnectionError] = useState('');
   const [approval, setApproval] = useState<AgentEvent | null>(null);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
@@ -70,6 +80,8 @@ export default function Home() {
   const [openSessionMenu, setOpenSessionMenu] = useState<string | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState<string | null>(null);
   const [sessionActionError, setSessionActionError] = useState<{ id: string; message: string } | null>(null);
+  const [diffView, setDiffView] = useState<DiffView | null>(null);
+  const [diffLoading, setDiffLoading] = useState('');
   const connection = useRef({ api: '', token: '' });
   const timelineEnd = useRef<HTMLDivElement>(null);
 
@@ -79,10 +91,12 @@ export default function Home() {
   const sessionId = activeSession.id;
   const toolCalls = events.filter((event) => event.type === 'tool_call').length;
   const latestStep = events.reduce((max, event) => Math.max(max, event.step || event.steps || 0), 0);
+  const fileChanges = events.filter((event) => event.type === 'tool_result' && ['edit_file', 'write_file'].includes(event.tool || '') && event.result?.ok);
   const currentTitle = live ? activeSession.title : '修复 slugify 测试';
   const orderedSessions = [...conversationStore.items].sort((left, right) => Number(right.pinned) - Number(left.pinned) || right.updatedAt - left.updatedAt);
   const recentSessions = orderedSessions.filter((session) => !session.archived);
   const archivedSessions = orderedSessions.filter((session) => session.archived);
+  const contextPercent = status ? Math.min(100, (activeSession.contextChars / status.max_context_chars) * 100) : 24;
 
   function updateSession(targetId: string, update: (session: ConversationSession) => ConversationSession) {
     setConversationStore((previous) => ({
@@ -92,10 +106,54 @@ export default function Home() {
   }
 
   function appendEvent(targetId: string, event: AgentEvent) {
-    updateSession(targetId, (session) => ({ ...session, events: [...session.events, event], updatedAt: Date.now() }));
+    updateSession(targetId, (session) => ({
+      ...session,
+      events: [...session.events, event],
+      updatedAt: Date.now(),
+      contextChars: event.context_chars ?? session.contextChars,
+      messageCount: event.message_count ?? session.messageCount,
+      contextCompactions: event.context_compactions ?? session.contextCompactions,
+    }));
   }
 
-  function startNewSession() {
+  const persistSession = useCallback(async (session: ConversationSession, fields?: Partial<Pick<ConversationSession, 'title' | 'pinned' | 'archived'>>) => {
+    const { api, token } = connection.current;
+    if (!api) return;
+    const payload = { session_id: session.id, ...(fields || {}) };
+    const response = await fetch(`${api}/api/sessions/update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error('无法保存会话状态');
+  }, []);
+
+  const loadSessions = useCallback(async (api: string, token: string) => {
+    const response = await fetch(`${api}/api/sessions`, { headers: { 'X-Yukai-Token': token } });
+    if (!response.ok) throw new Error('无法恢复历史会话');
+    const data = await response.json();
+    const restored: ConversationSession[] = (data.sessions || []).map((item: Record<string, unknown>) => ({
+      id: String(item.id),
+      title: String(item.title || '新会话'),
+      events: Array.isArray(item.events) ? item.events as AgentEvent[] : [],
+      updatedAt: Number(item.updated_at || Date.now()),
+      pinned: Boolean(item.pinned),
+      archived: Boolean(item.archived),
+      contextChars: Number(item.context_chars || 0),
+      messageCount: Number(item.message_count || 0),
+      contextCompactions: Number(item.context_compactions || 0),
+    }));
+    if (restored.length) {
+      const active = restored.find((item) => !item.archived) || restored[0];
+      setConversationStore({ items: restored, activeId: active.id });
+      return;
+    }
+    const fresh = createConversationSession();
+    setConversationStore({ items: [fresh], activeId: fresh.id });
+    await persistSession(fresh);
+  }, [persistSession]);
+
+  async function startNewSession() {
     if (!live || running) return;
     const session = createConversationSession();
     setConversationStore((previous) => ({ items: [session, ...previous.items], activeId: session.id }));
@@ -104,6 +162,11 @@ export default function Home() {
     setSessionActionError(null);
     setApproval(null);
     setPrompt('');
+    try {
+      await persistSession(session);
+    } catch (error) {
+      setConnectionError(error instanceof Error ? error.message : '无法保存新会话');
+    }
   }
 
   function switchSession(targetId: string) {
@@ -122,35 +185,44 @@ export default function Home() {
     setSessionActionError(null);
   }
 
-  function togglePinned(targetId: string) {
-    updateSession(targetId, (session) => ({ ...session, pinned: !session.pinned }));
+  async function togglePinned(targetId: string) {
+    const target = conversationStore.items.find((session) => session.id === targetId);
+    if (!target) return;
+    const pinned = !target.pinned;
+    updateSession(targetId, (session) => ({ ...session, pinned }));
     setOpenSessionMenu(null);
     setSessionActionError(null);
+    try { await persistSession(target, { pinned }); } catch (error) { setSessionActionError({ id: targetId, message: error instanceof Error ? error.message : '无法保存置顶状态' }); }
   }
 
-  function toggleArchived(targetId: string) {
-    setConversationStore((previous) => {
-      const target = previous.items.find((session) => session.id === targetId);
-      if (!target) return previous;
-      const archiving = !target.archived;
-      let items = previous.items.map((session) => session.id === targetId ? { ...session, archived: archiving } : session);
-      let activeId = previous.activeId;
-      if (archiving && activeId === targetId) {
+  async function toggleArchived(targetId: string) {
+    const selected = conversationStore.items.find((session) => session.id === targetId);
+    if (!selected) return;
+    const archived = !selected.archived;
+    let replacement: ConversationSession | null = null;
+    let items = conversationStore.items.map((session) => session.id === targetId ? { ...session, archived } : session);
+    let activeId = conversationStore.activeId;
+    if (archived && activeId === targetId) {
         const next = items.filter((session) => !session.archived).sort((left, right) => Number(right.pinned) - Number(left.pinned) || right.updatedAt - left.updatedAt)[0];
         if (next) activeId = next.id;
         else {
-          const replacement = createConversationSession();
+          replacement = createConversationSession();
           items = [replacement, ...items];
           activeId = replacement.id;
         }
-      }
-      return { items, activeId };
-    });
+    }
+    setConversationStore({ items, activeId });
     setOpenSessionMenu(null);
     setDeleteConfirmation(null);
     setSessionActionError(null);
     setApproval(null);
     setPrompt('');
+    try {
+      await persistSession(selected, { archived });
+      if (replacement) await persistSession(replacement);
+    } catch (error) {
+      setSessionActionError({ id: targetId, message: error instanceof Error ? error.message : '无法保存归档状态' });
+    }
   }
 
   async function deleteSession(targetId: string) {
@@ -174,20 +246,20 @@ export default function Home() {
         });
       }
       if (!response.ok) throw new Error('无法删除该会话');
-      setConversationStore((previous) => {
-        let items = previous.items.filter((session) => session.id !== targetId);
-        let activeId = previous.activeId;
+      let items = conversationStore.items.filter((session) => session.id !== targetId);
+      let activeId = conversationStore.activeId;
+      let replacement: ConversationSession | null = null;
         if (activeId === targetId) {
           const next = items.filter((session) => !session.archived).sort((left, right) => Number(right.pinned) - Number(left.pinned) || right.updatedAt - left.updatedAt)[0];
           if (next) activeId = next.id;
           else {
-            const replacement = createConversationSession();
+            replacement = createConversationSession();
             items = [replacement, ...items];
             activeId = replacement.id;
           }
         }
-        return { items, activeId };
-      });
+      setConversationStore({ items, activeId });
+      if (replacement) await persistSession(replacement);
       setOpenSessionMenu(null);
       setDeleteConfirmation(null);
       setSessionActionError(null);
@@ -215,6 +287,7 @@ export default function Home() {
         const response = await fetch(`${api}/api/status`, { headers });
         if (!response.ok) throw new Error(`连接失败 (${response.status})`);
         setStatus(await response.json());
+        await loadSessions(api, token);
         const fileResponse = await fetch(`${api}/api/files?path=.`, { headers });
         const fileData = await fileResponse.json();
         if (fileData.ok) setFiles(fileData.entries || []);
@@ -223,7 +296,7 @@ export default function Home() {
       }
     };
     void connect();
-  }, []);
+  }, [loadSessions]);
 
   useEffect(() => {
     if (!openSessionMenu) return;
@@ -325,8 +398,7 @@ export default function Home() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || '无法切换工作区');
       setStatus(data);
-      const session = createConversationSession();
-      setConversationStore({ items: [session], activeId: session.id });
+      await loadSessions(api, token);
       setApproval(null);
       setProjectPickerOpen(false);
       await refreshFiles();
@@ -390,6 +462,27 @@ export default function Home() {
       appendEvent(runSessionId, { type: 'error', error: messageText, timestamp: now() });
     } finally {
       setRunning(false);
+      setStopping(false);
+      setApproval(null);
+    }
+  }
+
+  async function stopTask() {
+    if (!running || stopping) return;
+    setStopping(true);
+    const { api, token } = connection.current;
+    try {
+      const response = await fetch(`${api}/api/sessions/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '无法停止任务');
+      setApproval(null);
+    } catch (error) {
+      setStopping(false);
+      setConnectionError(error instanceof Error ? error.message : '无法停止任务');
     }
   }
 
@@ -402,7 +495,7 @@ export default function Home() {
       headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
       body: JSON.stringify({ decision }),
     });
-    appendEvent(sessionId, { type: 'approval_decision', message: decision, timestamp: now() });
+    appendEvent(sessionId, { type: 'approval_decision', message: ({ allow: '已允许一次', allow_all: '已开启自动审批', reject: '已拒绝' })[decision], timestamp: now() });
     setApproval(null);
     if (decision === 'allow_all' && status && !forceManual) setStatus({ ...status, automatic_approval: true });
   }
@@ -413,7 +506,7 @@ export default function Home() {
     const response = await fetch(`${api}/api/undo`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
-      body: '{}',
+      body: JSON.stringify({ session_id: sessionId }),
     });
     const result = await response.json();
     appendEvent(sessionId, {
@@ -423,6 +516,28 @@ export default function Home() {
       timestamp: now(),
     });
     await refreshFiles();
+  }
+
+  async function openDiff(event: AgentEvent) {
+    const result = event.result || {};
+    const path = String(result.path || '');
+    const snapshotId = String(result.snapshot_id || '');
+    if (!path || !snapshotId) return;
+    const { api, token } = connection.current;
+    setDiffLoading(snapshotId);
+    setConnectionError('');
+    try {
+      const response = await fetch(`${api}/api/diff?snapshot_id=${encodeURIComponent(snapshotId)}&path=${encodeURIComponent(path)}`, {
+        headers: { 'X-Yukai-Token': token },
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '无法读取 Diff');
+      setDiffView({ path: data.path, diff: data.diff || '', truncated: Boolean(data.truncated) });
+    } catch (error) {
+      setConnectionError(error instanceof Error ? error.message : '无法读取 Diff');
+    } finally {
+      setDiffLoading('');
+    }
   }
 
   const shownFiles = live ? files.slice(0, 12) : [
@@ -473,23 +588,25 @@ export default function Home() {
           <form className="composer" onSubmit={submit}>
             {running && <div className="queue-toast"><span />Agent 正在执行任务</div>}
             <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={live ? '继续交给 Yukai 一个任务…' : '输入任务体验交互效果…'} aria-label="输入任务" rows={2} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-            <div className="composer-foot"><div><button type="button" className="mini-button">＋</button><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span></div><div><button type="button" className={`approval-switch ${status?.automatic_approval ? 'enabled' : ''}`} role="switch" aria-checked={Boolean(status?.automatic_approval)} onClick={toggleAutomaticApproval} disabled={!live || running} title="安全操作可自动通过，高风险命令始终需要人工确认"><span><i /></span>{status?.automatic_approval ? '安全操作自动审批' : '手动审批'}</button><button className="send" type="submit" disabled={!prompt.trim() || running}>{running ? '执行中…' : '运行任务'} <span>↵</span></button></div></div>
+            <div className="composer-foot"><div><button type="button" className="mini-button">＋</button><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span></div><div><button type="button" className={`approval-switch ${status?.automatic_approval ? 'enabled' : ''}`} role="switch" aria-checked={Boolean(status?.automatic_approval)} onClick={toggleAutomaticApproval} disabled={!live || running} title="安全操作可自动通过，高风险命令始终需要人工确认"><span><i /></span>{status?.automatic_approval ? '安全操作自动审批' : '手动审批'}</button>{running ? <button className="stop-task" type="button" onClick={stopTask} disabled={stopping}><span>■</span>{stopping ? '正在停止…' : '停止任务'}</button> : <button className="send" type="submit" disabled={!prompt.trim()}>运行任务 <span>↵</span></button>}</div></div>
           </form>
         </section>
 
         <aside className="inspector">
           <section className="inspector-section context-section">
-            <div className="panel-heading"><span>会话上下文</span><b>{live ? `${Math.min(events.length * 2, 99)}%` : '24%'}</b></div><div className="meter"><i style={{ width: `${live ? Math.min(events.length * 2, 99) : 24}%` }} /></div><div className="meter-label"><span>{events.length || 12} events</span><span>800k chars</span></div>
+            <div className="panel-heading"><span>会话上下文</span><b>{live ? `${contextPercent.toFixed(contextPercent < 1 ? 1 : 0)}%` : '24%'}</b></div><div className="meter"><i style={{ width: `${live ? contextPercent : 24}%` }} /></div><div className="meter-label"><span>{live ? `${activeSession.messageCount} 条消息` : '12 条消息'}</span><span>{live ? `${formatChars(activeSession.contextChars)} / ${formatChars(status?.max_context_chars || 0)}` : '192k / 800k chars'}</span></div>
+            {live && activeSession.contextCompactions > 0 && <div className="context-note">已自动压缩 {activeSession.contextCompactions} 次上下文</div>}
             <div className="stat-grid"><div><b>{live ? latestStep : 6}</b><span>模型步骤</span></div><div><b>{live ? toolCalls : 7}</b><span>工具调用</span></div><div><b>{events.filter((item) => item.type === 'final').length}</b><span>完成任务</span></div></div>
           </section>
-          <section className="inspector-section"><div className="panel-heading"><span>文件变更</span><small>{events.filter((item) => item.tool === 'edit_file' || item.tool === 'write_file').length || (live ? 0 : 1)} FILE</small></div>{live ? <ChangeSummary events={events} /> : <><button className="change-card"><span className="python-icon">Py</span><div><b>slugify.py</b><small><em>+12</em> <del>−1</del></small></div><span>›</span></button><button className="diff-button">查看完整 Diff <span>↗</span></button></>}</section>
+          <section className="inspector-section"><div className="panel-heading"><span>文件变更</span><small>{fileChanges.length || (live ? 0 : 1)} FILE</small></div>{live ? <ChangeSummary events={events} loading={diffLoading} onOpen={openDiff} /> : <><button className="change-card"><span className="python-icon">Py</span><div><b>slugify.py</b><small><em>+12</em> <del>−1</del></small></div><span>›</span></button><button className="diff-button">查看完整 Diff <span>↗</span></button></>}</section>
           <section className="inspector-section file-section"><div className="panel-heading"><span>工作区</span><button onClick={refreshFiles}>↻</button></div><div className="file-tree">{shownFiles.map((file) => <div key={file.path}><span>{file.type === 'directory' ? '▾' : file.path.endsWith('.py') ? 'Py' : '≡'}</span><b>{file.path}</b>{events.some((event) => String(event.arguments?.path || '') === file.path && ['write_file', 'edit_file'].includes(event.tool || '')) && <em>M</em>}</div>)}</div></section>
           <section className="safety-card"><span className="shield">◇</span><div><b>危险命令防护已开启</b><small>{live ? '高风险需确认 · 灾难性操作直接拦截' : '演示模式未连接本地文件'}</small></div></section>
         </aside>
       </div>
 
-      {approval && <ApprovalDialog event={approval} onDecision={decide} />}
+      {approval && <ApprovalDialog event={approval} stopping={stopping} onDecision={decide} onStop={stopTask} />}
       {projectPickerOpen && <ProjectPicker projects={projects} directory={directory} error={pickerError} switching={switchingWorkspace} onBrowse={browseDirectory} onSelect={selectWorkspace} onClose={() => setProjectPickerOpen(false)} />}
+      {diffView && <DiffDialog view={diffView} onClose={() => setDiffView(null)} />}
     </main>
   );
 }
@@ -553,14 +670,23 @@ function ToolResult({ event }: { event: AgentEvent }) {
   return <div className={`tool-result-row ${ok ? 'ok' : 'failed'}`}><span>{ok ? '✓' : '×'}</span><div><b>{ok ? '执行成功' : '执行失败'} · {event.tool}</b><small>{detail}</small>{output && <pre>{compact(output, 1600)}</pre>}</div></div>;
 }
 
-function ChangeSummary({ events }: { events: AgentEvent[] }) {
-  const changes = events.filter((event) => ['write_file', 'edit_file'].includes(event.tool || '') && event.type === 'tool_call');
+function ChangeSummary({ events, loading, onOpen }: { events: AgentEvent[]; loading: string; onOpen: (event: AgentEvent) => void }) {
+  const changes = events.filter((event) => ['write_file', 'edit_file'].includes(event.tool || '') && event.type === 'tool_result' && event.result?.ok && event.result?.snapshot_id);
   if (!changes.length) return <p className="panel-empty">暂无文件修改</p>;
-  return <>{changes.slice(-4).map((event, index) => <button className="change-card" key={index}><span className="python-icon">{String(event.arguments?.path || '').endsWith('.py') ? 'Py' : 'M'}</span><div><b>{String(event.arguments?.path || 'file')}</b><small><em>{event.tool === 'write_file' ? '已写入' : '已编辑'}</em></small></div><span>›</span></button>)}</>;
+  return <>{changes.slice(-4).map((event, index) => {
+    const path = String(event.result?.path || 'file');
+    const snapshotId = String(event.result?.snapshot_id || '');
+    return <button className="change-card" key={`${snapshotId}-${index}`} onClick={() => onOpen(event)} disabled={loading === snapshotId}><span className="python-icon">{path.endsWith('.py') ? 'Py' : 'M'}</span><div><b>{path}</b><small><em>{loading === snapshotId ? '正在生成 Diff…' : event.tool === 'write_file' ? '已写入 · 查看 Diff' : '已编辑 · 查看 Diff'}</em></small></div><span>›</span></button>;
+  })}</>;
 }
 
-function ApprovalDialog({ event, onDecision }: { event: AgentEvent; onDecision: (decision: 'allow' | 'allow_all' | 'reject') => void }) {
-  return <div className="modal-backdrop"><section className={`approval-dialog ${event.force_manual ? 'high-risk' : ''}`} role="dialog" aria-modal="true" aria-labelledby="approval-title"><div className="approval-symbol">!</div><p className="eyebrow">{event.force_manual ? 'HIGH-RISK CONFIRMATION' : 'PERMISSION REQUIRED'}</p><h2 id="approval-title">{event.force_manual ? '确认执行高风险操作？' : '允许 Agent 执行此操作？'}</h2><div className="approval-operation"><span className="activity-icon">{toolIcon(event.tool)}</span><div><b>{toolLabel(event)}</b><small>{toolDetail(event)}</small></div></div>{event.risk_reason && <div className="risk-reason"><b>风险原因</b><span>{riskReasonLabel(event.risk_reason)}</span></div>}<p>{event.force_manual ? '自动审批不会跳过这一步。只有明确确认后，本次操作才会执行。' : '此操作可能修改工作区或执行本地命令。请确认内容符合你的预期。'}</p><div className="approval-actions"><button onClick={() => onDecision('reject')}>拒绝</button>{!event.force_manual && <button onClick={() => onDecision('allow_all')}>本次会话自动审批</button>}<button className="primary" onClick={() => onDecision('allow')}>允许一次</button></div></section></div>;
+function ApprovalDialog({ event, stopping, onDecision, onStop }: { event: AgentEvent; stopping: boolean; onDecision: (decision: 'allow' | 'allow_all' | 'reject') => void; onStop: () => void }) {
+  return <div className="modal-backdrop"><section className={`approval-dialog ${event.force_manual ? 'high-risk' : ''}`} role="dialog" aria-modal="true" aria-labelledby="approval-title"><div className="approval-symbol">!</div><p className="eyebrow">{event.force_manual ? 'HIGH-RISK CONFIRMATION' : 'PERMISSION REQUIRED'}</p><h2 id="approval-title">{event.force_manual ? '确认执行高风险操作？' : '允许 Agent 执行此操作？'}</h2><div className="approval-operation"><span className="activity-icon">{toolIcon(event.tool)}</span><div><b>{toolLabel(event)}</b><small>{toolDetail(event)}</small></div></div>{event.risk_reason && <div className="risk-reason"><b>风险原因</b><span>{riskReasonLabel(event.risk_reason)}</span></div>}<p>{event.force_manual ? '自动审批不会跳过这一步。只有明确确认后，本次操作才会执行。' : '此操作可能修改工作区或执行本地命令。请确认内容符合你的预期。'}</p><div className="approval-actions"><button className="stop-approval" onClick={onStop} disabled={stopping}>{stopping ? '正在停止…' : '停止任务'}</button><button onClick={() => onDecision('reject')}>拒绝操作</button>{!event.force_manual && <button onClick={() => onDecision('allow_all')}>本次会话自动审批</button>}<button className="primary" onClick={() => onDecision('allow')}>允许一次</button></div></section></div>;
+}
+
+function DiffDialog({ view, onClose }: { view: DiffView; onClose: () => void }) {
+  const lines = view.diff ? view.diff.split('\n') : [];
+  return <div className="modal-backdrop"><section className="diff-dialog" role="dialog" aria-modal="true" aria-labelledby="diff-title"><header><div><p className="eyebrow">FILE CHANGES</p><h2 id="diff-title">{view.path}</h2></div><button className="dialog-close" type="button" onClick={onClose} aria-label="关闭 Diff">×</button></header>{lines.length ? <pre className="diff-content">{lines.map((line, index) => <span key={index} className={line.startsWith('+') && !line.startsWith('+++') ? 'added' : line.startsWith('-') && !line.startsWith('---') ? 'removed' : line.startsWith('@@') ? 'hunk' : ''}>{line || ' '}{'\n'}</span>)}</pre> : <div className="diff-empty">当前文件内容与修改前一致。</div>}{view.truncated && <footer>Diff 内容过长，已显示前 200,000 个字符。</footer>}</section></div>;
 }
 
 function ProjectPicker({ projects, directory, error, switching, onBrowse, onSelect, onClose }: { projects: Projects | null; directory: DirectoryListing | null; error: string; switching: boolean; onBrowse: (path?: string) => void; onSelect: (path: string) => void; onClose: () => void }) {
@@ -641,6 +767,9 @@ function createConversationSession(): ConversationSession {
     updatedAt: Date.now(),
     pinned: false,
     archived: false,
+    contextChars: 0,
+    messageCount: 0,
+    contextCompactions: 0,
   };
 }
 function sessionTime(updatedAt: number) {
@@ -651,5 +780,6 @@ function sessionTime(updatedAt: number) {
   return new Date(updatedAt).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
 }
 function compact(value: string, limit: number) { const normalized = value.replace(/\s+/g, ' ').trim(); return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}…`; }
+function formatChars(value: number) { if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m chars`; if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k chars`; return `${value} chars`; }
 function projectName(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) || path; }
 function now() { return new Date().toLocaleTimeString('zh-CN', { hour12: false }); }

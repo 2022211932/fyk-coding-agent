@@ -2,6 +2,8 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 from fyk_agent.tools import ToolRegistry, assess_tool_risk
@@ -40,6 +42,18 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertEqual((self.root / "src" / "app.py").read_text(encoding="utf-8"), "value = 1\n")
         self.registry.undo_last()
         self.assertFalse((self.root / "src" / "app.py").exists())
+
+    def test_file_change_exposes_unified_diff(self) -> None:
+        (self.root / "app.py").write_text("value = 1\n", encoding="utf-8")
+        edited = self.registry.execute(
+            "edit_file",
+            {"path": "app.py", "old_text": "value = 1", "new_text": "value = 2"},
+        )
+        diff = self.registry.journal.unified_diff(edited["snapshot_id"], "app.py")
+        self.assertIn("-value = 1", diff["diff"])
+        self.assertIn("+value = 2", diff["diff"])
+        with self.assertRaisesRegex(ValueError, "does not belong"):
+            self.registry.journal.unified_diff(edited["snapshot_id"], "other.py")
 
     def test_edit_requires_exact_match_count(self) -> None:
         (self.root / "data.txt").write_text("x x", encoding="utf-8")
@@ -90,6 +104,29 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["stdout"].strip(), "hidden")
         self.assertEqual(result["exit_code"], 0)
+
+    def test_running_command_can_be_cancelled(self) -> None:
+        cancelled = threading.Event()
+        registry = ToolRegistry(
+            Workspace(self.root),
+            approve=lambda _name, _args: True,
+            approve_risky=lambda _name, _args, _reason: True,
+            cancelled=cancelled.is_set,
+        )
+        results: list[dict] = []
+        command = f'"{sys.executable}" -c "import time; time.sleep(10)"'
+        worker = threading.Thread(
+            target=lambda: results.append(
+                registry.execute("run_command", {"command": command, "timeout": 20})
+            )
+        )
+        worker.start()
+        time.sleep(0.35)
+        cancelled.set()
+        worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(results[0]["cancelled"])
+        self.assertEqual(results[0]["error_type"], "cancelled")
 
     def test_catastrophic_command_is_blocked_before_approval(self) -> None:
         approvals: list[str] = []
