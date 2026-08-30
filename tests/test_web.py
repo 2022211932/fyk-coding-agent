@@ -228,11 +228,14 @@ class WebConsoleTests(unittest.TestCase):
         self.assertEqual(len(event["result"]["stdout"]), 8_000)
 
     def test_approval_can_be_resolved_by_id(self) -> None:
-        pending = PendingApproval()
+        pending = PendingApproval(session_id="approval-session")
         self.state.approvals["approval"] = pending
         self.assertTrue(self.state.resolve_approval("approval", "allow"))
         self.assertTrue(pending.event.is_set())
         self.assertEqual(pending.decision, "allow")
+        decision = self.state.sessions["approval-session"].events[-1]
+        self.assertEqual(decision["approval_id"], "approval")
+        self.assertEqual(decision["decision"], "allow")
         self.assertFalse(self.state.resolve_approval("missing", "allow"))
 
     def test_automatic_mode_still_requests_high_risk_confirmation(self) -> None:

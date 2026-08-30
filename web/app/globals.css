@@ -126,7 +126,16 @@ button { color: inherit; }
 .answer-title b { font-size: 11px; }
 .answer-title small { margin-left: auto; color: var(--faint); font-size: 8px; }
 .answer-card > p { margin: 11px 0; color: #aebbc0; font-size: 10px; line-height: 1.75; }
-.answer-card > p.answer-text { white-space: pre-wrap; font-size: 11px; }
+.answer-markdown { margin-top: 11px; color: #aebbc0; font-size: 11px; line-height: 1.75; }
+.answer-markdown h3, .answer-markdown h4, .answer-markdown h5 { margin: 14px 0 6px; color: #e0e8e9; line-height: 1.35; }
+.answer-markdown h3 { font-size: 14px; }
+.answer-markdown h4 { font-size: 12px; }
+.answer-markdown h5 { font-size: 11px; }
+.answer-markdown p { margin: 7px 0; }
+.answer-markdown ul { margin: 7px 0; padding-left: 18px; }
+.answer-markdown li { margin: 3px 0; }
+.answer-markdown strong { color: #d9e5e2; font-weight: 700; }
+.answer-markdown code { padding: 1px 4px; border-radius: 4px; background: rgba(100,230,194,.08); }
 code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: #b8d9d0; }
 .verification { border-top: 1px solid rgba(100,230,194,.14); padding-top: 10px; display: flex; gap: 7px; align-items: center; color: var(--mint); font-size: 9px; }
 .verification code { margin-left: auto; color: #82938e; font-size: 8px; }
@@ -172,6 +181,11 @@ kbd { font: 7px ui-monospace, monospace; border: 1px solid #2b3640; border-botto
 .thinking-row .pulse { width: 8px; height: 8px; margin-left: 9px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 0 0 rgba(100,230,194,.5); animation: pulse 1.5s infinite; }
 .running-dot { width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--blue); animation: spin 1s linear infinite; }
 .approval-row { border-color: rgba(245,183,101,.25); }
+.approval-row.resolved { border-color: rgba(100,230,194,.25); background: rgba(100,230,194,.04); }
+.approval-row.rejected { border-color: rgba(255,120,109,.25); background: rgba(255,120,109,.04); }
+.exit-badge.resolved { color: var(--mint); background: var(--mint-soft); }
+.exit-badge.rejected { color: var(--red); background: rgba(255,120,109,.1); }
+.plan-blocker-evidence { margin-top: 3px; color: #9b7773 !important; }
 .tool-result-row { margin: -4px 0 9px 63px; display: grid; grid-template-columns: 19px 1fr; gap: 7px; color: var(--muted); }
 .tool-result-row > span { width: 17px; height: 17px; border-radius: 50%; display: grid; place-items: center; color: #07110e; background: var(--mint); font-size: 9px; font-weight: 900; }
 .tool-result-row.failed > span { background: var(--red); }

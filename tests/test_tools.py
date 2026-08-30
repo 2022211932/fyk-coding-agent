@@ -5,8 +5,14 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
-from fyk_agent.tools import ToolRegistry, assess_tool_risk
+from fyk_agent.tools import (
+    ToolRegistry,
+    _decode_command_output,
+    _sanitize_command_output,
+    assess_tool_risk,
+)
 from fyk_agent.workspace import Workspace
 
 
@@ -105,6 +111,79 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertEqual(result["stdout"].strip(), "hidden")
         self.assertEqual(result["exit_code"], 0)
 
+    def test_environment_reports_shell_and_workspace(self) -> None:
+        result = self.registry.execute("get_environment", {})
+        self.assertTrue(result["ok"])
+        self.assertEqual(Path(result["workspace"]), self.root)
+        self.assertTrue(result["shell"])
+        self.assertTrue(result["os"])
+
+    def test_package_script_preflight_rejects_missing_manifest_before_approval(self) -> None:
+        approvals: list[str] = []
+        registry = ToolRegistry(
+            Workspace(self.root),
+            approve=lambda name, _args: approvals.append(name) or True,
+        )
+        result = registry.execute("run_command", {"command": "npm test"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "missing_project_manifest")
+        self.assertEqual(result["duration_ms"], 0)
+        self.assertEqual(approvals, [])
+
+    def test_package_script_preflight_rejects_undefined_script(self) -> None:
+        (self.root / "package.json").write_text(
+            '{"scripts":{"build":"echo ok"}}', encoding="utf-8"
+        )
+        result = self.registry.execute("run_command", {"command": "npm test"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "missing_package_script")
+        self.assertEqual(result["available_scripts"], ["build"])
+
+    def test_bun_native_test_is_not_treated_as_a_package_script(self) -> None:
+        self.assertIsNone(self.registry._preflight_run_command({"command": "bun test"}))
+
+    def test_windows_unix_command_is_rejected_before_approval(self) -> None:
+        approvals: list[str] = []
+        registry = ToolRegistry(
+            Workspace(self.root),
+            approve_risky=lambda _name, _args, reason: approvals.append(reason) or True,
+        )
+        with patch("fyk_agent.tools.os.name", "nt"):
+            result = registry.execute(
+                "run_command",
+                {"command": "ls -la && find . -maxdepth 2 -type f"},
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "incompatible_shell_command")
+        self.assertIn("list_files", result["suggestion"])
+        self.assertEqual(approvals, [])
+
+    def test_approval_wait_is_not_counted_as_execution_duration(self) -> None:
+        clock = [0.0]
+
+        def approve(_name: str, _args: dict) -> bool:
+            clock[0] = 15.0
+            return True
+
+        registry = ToolRegistry(Workspace(self.root), approve=approve)
+        with patch("fyk_agent.tools.time.monotonic", side_effect=lambda: clock[0]):
+            result = registry.execute("write_file", {"path": "timed.txt", "content": "ok"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["duration_ms"], 0)
+
+    def test_windows_command_output_encoding_falls_back_without_mojibake(self) -> None:
+        text = "中文路径"
+        with patch("fyk_agent.tools.os.name", "nt"):
+            self.assertEqual(_decode_command_output(text.encode("cp936")), text)
+
+    def test_shell_output_hides_internal_state_paths(self) -> None:
+        output = "safe.txt\nC:\\work\\.yukai\\events.jsonl\n.fyk-agent/snapshots.jsonl\n"
+        sanitized = _sanitize_command_output(output)
+        self.assertIn("safe.txt", sanitized)
+        self.assertNotIn("events.jsonl", sanitized)
+        self.assertNotIn("snapshots.jsonl", sanitized)
+        self.assertIn("internal state omitted", sanitized)
+
     def test_running_command_can_be_cancelled(self) -> None:
         cancelled = threading.Event()
         registry = ToolRegistry(
@@ -142,6 +221,7 @@ class ToolRegistryTests(unittest.TestCase):
             r"Remove-Item C:\ -Recurse -Force",
             "shutdown /s /t 0",
             "format C:",
+            "type .yukai\\events.jsonl",
         ]
         for command in commands:
             with self.subTest(command=command):

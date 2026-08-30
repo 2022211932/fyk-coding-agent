@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import fnmatch
 import json
+import locale
 import os
 from pathlib import Path
+import platform
 import re
 import signal
 import subprocess
@@ -72,7 +74,6 @@ class ToolRegistry:
         return [spec.api_schema() for spec in self._specs.values()]
 
     def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        started = time.monotonic()
         if self.cancelled():
             return _failure("Task was stopped", error_type="cancelled", cancelled=True)
         spec = self._specs.get(name)
@@ -82,6 +83,21 @@ class ToolRegistry:
             return result
         if not isinstance(arguments, dict):
             return _failure("Tool arguments must be a JSON object", error_type="invalid_arguments")
+        if name == "run_command":
+            try:
+                preflight_result = self._preflight_run_command(arguments)
+            except (ToolError, WorkspaceError, OSError, UnicodeError) as exc:
+                preflight_result = _failure(str(exc), error_type=type(exc).__name__)
+            if preflight_result is not None:
+                preflight_result["duration_ms"] = 0
+                self.events.emit(
+                    "tool_finished",
+                    tool=name,
+                    ok=False,
+                    duration_ms=0,
+                    summary=_result_summary(preflight_result),
+                )
+                return preflight_result
         risk = assess_tool_risk(name, arguments)
         if risk.level == "blocked":
             result = _failure(
@@ -102,6 +118,8 @@ class ToolRegistry:
                 self.events.emit("tool_rejected", tool=name, risk=risk.level)
                 return result
 
+        # Execution duration deliberately starts after any human approval wait.
+        started = time.monotonic()
         try:
             result = spec.handler(**arguments)
         except TypeError as exc:
@@ -133,6 +151,12 @@ class ToolRegistry:
 
     def _build_specs(self) -> dict[str, ToolSpec]:
         specs = [
+            ToolSpec(
+                "get_environment",
+                "Read the current operating system, shell, Python runtime, and workspace path before choosing platform-specific commands.",
+                _object_schema({}),
+                self.get_environment,
+            ),
             ToolSpec(
                 "list_files",
                 "List files and directories inside the workspace. Use this before assuming project structure.",
@@ -220,6 +244,87 @@ class ToolRegistry:
             ),
         ]
         return {spec.name: spec for spec in specs}
+
+    def get_environment(self) -> dict[str, Any]:
+        shell = os.environ.get("COMSPEC" if os.name == "nt" else "SHELL")
+        if not shell:
+            shell = "cmd.exe" if os.name == "nt" else "/bin/sh"
+        return {
+            "ok": True,
+            "os": platform.system() or os.name,
+            "platform": platform.platform(),
+            "shell": shell,
+            "path_separator": os.sep,
+            "python": platform.python_version(),
+            "workspace": str(self.workspace.root),
+        }
+
+    def _preflight_run_command(self, arguments: dict[str, Any]) -> dict[str, Any] | None:
+        command = arguments.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return None
+        if os.name == "nt":
+            incompatible = [
+                (r"^\s*ls(?:\s|$)", "Use list_files, or use dir for a non-recursive cmd listing"),
+                (
+                    r"^\s*find\s+(?:\.|/)[^\r\n]*\s-(?:maxdepth|mindepth|type|name)\b",
+                    "Use list_files/search_text, or use a command valid for cmd.exe",
+                ),
+                (r"^\s*(?:cat|pwd|which|grep)(?:\s|$)", "Use the corresponding structured Yukai tool"),
+            ]
+            for pattern, suggestion in incompatible:
+                if re.search(pattern, command, flags=re.IGNORECASE):
+                    return _failure(
+                        "Command syntax is incompatible with the configured Windows cmd.exe shell",
+                        error_type="incompatible_shell_command",
+                        shell=os.environ.get("COMSPEC", "cmd.exe"),
+                        suggestion=suggestion,
+                    )
+        match = re.match(
+            r"^\s*(?:(?:npm(?:\.cmd)?|pnpm(?:\.cmd)?|yarn(?:\.cmd)?)\s+"
+            r"(?:test(?:\s|$)|run\s+([A-Za-z0-9:_-]+)(?:\s|$))|"
+            r"bun(?:\.exe)?\s+run\s+([A-Za-z0-9:_-]+)(?:\s|$))",
+            command,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        script = match.group(1) or match.group(2) or "test"
+        cwd = arguments.get("cwd", ".")
+        working_directory = self.workspace.resolve(cwd, must_exist=True)
+        if not working_directory.is_dir():
+            raise ToolError(f"Command cwd is not a directory: {cwd}")
+        relative_cwd = self.workspace.relative(working_directory)
+        manifest_path = "package.json" if relative_cwd == "." else f"{relative_cwd}/package.json"
+        manifest = self.workspace.resolve(manifest_path)
+        if not manifest.is_file():
+            return _failure(
+                f"Cannot run package script '{script}': package.json was not found in the command working directory",
+                error_type="missing_project_manifest",
+                cwd=relative_cwd,
+                expected="package.json",
+                script=script,
+            )
+        try:
+            package = json.loads(manifest.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            return _failure(
+                f"Cannot read package.json: {exc}",
+                error_type="invalid_project_manifest",
+                cwd=relative_cwd,
+                script=script,
+            )
+        scripts = package.get("scripts", {}) if isinstance(package, dict) else {}
+        if not isinstance(scripts, dict) or script not in scripts:
+            available = sorted(str(name) for name in scripts) if isinstance(scripts, dict) else []
+            return _failure(
+                f"Cannot run package script '{script}': it is not defined in package.json",
+                error_type="missing_package_script",
+                cwd=relative_cwd,
+                script=script,
+                available_scripts=available,
+            )
+        return None
 
     def list_files(
         self, path: str = ".", pattern: str = "*", max_results: int = 300
@@ -403,9 +508,7 @@ class ToolRegistry:
                 cwd=working_directory,
                 env=environment,
                 shell=False,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                text=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 **creation_options,
@@ -439,8 +542,12 @@ class ToolRegistry:
                 stdout_text, stderr_text = process.communicate(timeout=min(0.2, remaining))
             except subprocess.TimeoutExpired:
                 continue
-            stdout, stdout_truncated = _truncate(stdout_text, MAX_COMMAND_OUTPUT)
-            stderr, stderr_truncated = _truncate(stderr_text, MAX_COMMAND_OUTPUT)
+            stdout, stdout_truncated = _truncate(
+                _sanitize_command_output(_decode_command_output(stdout_text)), MAX_COMMAND_OUTPUT
+            )
+            stderr, stderr_truncated = _truncate(
+                _sanitize_command_output(_decode_command_output(stderr_text)), MAX_COMMAND_OUTPUT
+            )
             return {
                 "ok": process.returncode == 0,
                 "command": command,
@@ -477,6 +584,7 @@ _SAFE_COMMAND_PATTERNS = [
 ]
 
 _BLOCKED_COMMAND_PATTERNS = [
+    (r"(?:^|[/\\\s'\"])\.(?:yukai|fyk-agent)(?:[/\\\s'\"]|$)", "Yukai internal state directories cannot be accessed through shell commands"),
     (r"(?:^|\s)(?:shutdown|reboot|halt|poweroff|stop-computer|restart-computer)(?:\s|$)", "system shutdown and restart commands are not allowed"),
     (r"(?:^|\s)(?:mkfs(?:\.[a-z0-9]+)?|fdisk|parted|diskpart)(?:\s|$)", "disk formatting and partition commands are not allowed"),
     (r"\bdd\s+.*\bof\s*=\s*(?:/dev/|\\\\\.\\)", "raw writes to block devices are not allowed"),
@@ -541,7 +649,7 @@ def _failure(message: str, *, error_type: str, **details: Any) -> dict[str, Any]
     return {"ok": False, "error": message, "error_type": error_type, **details}
 
 
-def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
     if process.poll() is not None:
         return
     if os.name == "nt":
@@ -567,14 +675,18 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
 def _command_interrupted_result(
     command: str,
     cwd: str,
-    stdout: str,
-    stderr: str,
+    stdout: bytes | str,
+    stderr: bytes | str,
     *,
     cancelled: bool,
     error: str,
 ) -> dict[str, Any]:
-    safe_stdout, stdout_truncated = _truncate(stdout, MAX_COMMAND_OUTPUT)
-    safe_stderr, stderr_truncated = _truncate(stderr, MAX_COMMAND_OUTPUT)
+    safe_stdout, stdout_truncated = _truncate(
+        _sanitize_command_output(_decode_command_output(stdout)), MAX_COMMAND_OUTPUT
+    )
+    safe_stderr, stderr_truncated = _truncate(
+        _sanitize_command_output(_decode_command_output(stderr)), MAX_COMMAND_OUTPUT
+    )
     return {
         "ok": False,
         "command": command,
@@ -595,6 +707,39 @@ def _truncate(value: str, limit: int) -> tuple[str, bool]:
         return value, False
     half = limit // 2
     return value[:half] + "\n... output truncated ...\n" + value[-half:], True
+
+
+def _decode_command_output(value: bytes | str | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    candidates = ["utf-8", locale.getpreferredencoding(False)]
+    if os.name == "nt":
+        candidates.extend(["mbcs", "cp936"])
+    for encoding in dict.fromkeys(candidates):
+        try:
+            return value.decode(encoding, errors="strict")
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return value.decode("utf-8", errors="replace")
+
+
+def _sanitize_command_output(value: str) -> str:
+    lines = value.splitlines(keepends=True)
+    visible = [
+        line
+        for line in lines
+        if not re.search(
+            r"(?:^|[/\\\s'\"])\.(?:yukai|fyk-agent)(?:[/\\\s'\"]|$)",
+            line,
+            re.IGNORECASE,
+        )
+    ]
+    removed = len(lines) - len(visible)
+    if removed:
+        visible.append(f"[Yukai internal state omitted: {removed} line(s)]\n")
+    return "".join(visible)
 
 
 def _result_summary(result: dict[str, Any]) -> str:

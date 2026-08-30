@@ -337,7 +337,12 @@ class WebAgentState:
             labels = {"allow": "已允许一次", "allow_all": "已开启自动审批", "reject": "已拒绝"}
             self.append_session_event(
                 session_id,
-                {"type": "approval_decision", "message": labels[decision]},
+                {
+                    "type": "approval_decision",
+                    "message": labels[decision],
+                    "approval_id": approval_id,
+                    "decision": decision,
+                },
             )
         return True
 

@@ -225,6 +225,7 @@ class AgentLoopTests(unittest.TestCase):
                                 "kind": "other",
                                 "status": "blocked",
                                 "note": "Network access is unavailable",
+                                "blocker_type": "user_input_required",
                             }
                         ],
                     },
@@ -235,6 +236,7 @@ class AgentLoopTests(unittest.TestCase):
         )
         result = CodingAgent(client, self.registry).run("Contact the service")
         self.assertEqual(result.stop_reason, "blocked")
+        self.assertTrue(result.final_text.startswith("任务未完成："))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 
 type AgentEvent = {
   type: string;
@@ -15,6 +15,7 @@ type AgentEvent = {
   stop_reason?: string;
   compactions?: number;
   approval_id?: string;
+  decision?: 'allow' | 'allow_all' | 'reject';
   force_manual?: boolean;
   risk_reason?: string;
   timestamp?: string;
@@ -26,8 +27,8 @@ type AgentEvent = {
   unfinished?: string[];
 };
 
-type PlanEvidence = { id: string; tool: string; ok: boolean; summary: string; step: number; verification: boolean };
-type PlanStep = { id: string; title: string; kind: 'inspect' | 'change' | 'verify' | 'other'; status: 'pending' | 'in_progress' | 'completed' | 'blocked'; evidence_ids: string[]; note: string };
+type PlanEvidence = { id: string; tool: string; ok: boolean; summary: string; step: number; verification: boolean; error_type?: string };
+type PlanStep = { id: string; title: string; kind: 'inspect' | 'change' | 'verify' | 'other'; status: 'pending' | 'in_progress' | 'completed' | 'blocked'; evidence_ids: string[]; note: string; blocker_type?: 'tool_failure' | 'missing_prerequisite' | 'environment' | 'user_input_required' };
 type TaskPlan = { summary: string; steps: PlanStep[]; completed: number; total: number; terminal: boolean; blocked: boolean; evidence: PlanEvidence[] };
 
 type Status = {
@@ -503,7 +504,7 @@ export default function Home() {
       headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
       body: JSON.stringify({ decision }),
     });
-    appendEvent(sessionId, { type: 'approval_decision', message: ({ allow: '已允许一次', allow_all: '已开启自动审批', reject: '已拒绝' })[decision], timestamp: now() });
+    appendEvent(sessionId, { type: 'approval_decision', approval_id: approval.approval_id, decision, message: ({ allow: '已允许一次', allow_all: '已开启自动审批', reject: '已拒绝' })[decision], timestamp: now() });
     setApproval(null);
     if (decision === 'allow_all' && status && !forceManual) setStatus({ ...status, automatic_approval: true });
   }
@@ -650,18 +651,28 @@ function SessionListItem({ session, active, running, time, menuOpen, confirmingD
 }
 
 function LiveTimeline({ events, running }: { events: AgentEvent[]; running: boolean }) {
+  const approvalDecisions = new Map(
+    events
+      .filter((event) => event.type === 'approval_decision' && event.approval_id)
+      .map((event) => [event.approval_id as string, event])
+  );
   return <>{events.map((event, index) => {
     if (event.type === 'run_started') return null;
     if (event.type === 'user') return <article className="user-turn" key={index}><div className="avatar user-avatar">FY</div><div className="turn-body"><div className="turn-meta"><b>你</b><time>{event.timestamp}</time></div><p>{event.message}</p></div></article>;
     if (event.type === 'model_request') return <div className="live-activity thinking-row" key={index}><span className="pulse" /><div><b>DeepSeek 正在思考</b><small>模型步骤 {event.step}</small></div></div>;
     if (event.type === 'tool_call') return <div className="live-activity" key={index}><span className="activity-icon">{toolIcon(event.tool)}</span><div><b>{toolLabel(event)}</b><small>{toolDetail(event)}</small></div><span className="running-dot" /></div>;
     if (event.type === 'tool_result') return <ToolResult event={event} key={index} />;
-    if (event.type === 'approval_required') return <div className="live-activity approval-row" key={index}><span className="activity-icon">!</span><div><b>{event.force_manual ? '高风险操作等待确认' : '等待操作审批'}</b><small>{event.risk_reason ? riskReasonLabel(event.risk_reason) : toolLabel(event)}</small></div><span className="exit-badge">REVIEW</span></div>;
-    if (event.type === 'approval_decision') return <div className="notice-row" key={index}>审批结果：{event.message}</div>;
+    if (event.type === 'approval_required') {
+      const resolved = event.approval_id ? approvalDecisions.get(event.approval_id) : undefined;
+      const rejected = resolved?.decision === 'reject';
+      const title = resolved ? (rejected ? '操作已拒绝' : resolved.decision === 'allow_all' ? '已允许并开启自动审批' : '已允许本次操作') : event.force_manual ? '高风险操作等待确认' : '等待操作审批';
+      return <div className={`live-activity approval-row ${resolved ? rejected ? 'rejected' : 'resolved' : ''}`} key={index}><span className="activity-icon">{resolved ? rejected ? '×' : '✓' : '!'}</span><div><b>{title}</b><small>{event.risk_reason ? riskReasonLabel(event.risk_reason) : toolLabel(event)}</small></div><span className={`exit-badge ${resolved ? rejected ? 'rejected' : 'resolved' : ''}`}>{resolved ? rejected ? 'REJECTED' : 'ALLOWED' : 'REVIEW'}</span></div>;
+    }
+    if (event.type === 'approval_decision') return event.approval_id ? null : <div className="notice-row" key={index}>审批结果：{event.message}</div>;
     if (event.type === 'plan_incomplete') return <div className="notice-row" key={index}>计划尚未完成：{event.unfinished?.join('、')}</div>;
     if (event.type === 'final') {
       const finalState = finalStatus(event.stop_reason);
-      return <article className="agent-turn live-answer" key={index}><div className="avatar agent-avatar"><span>Y</span></div><div className="turn-body"><div className="turn-meta"><b>Yukai</b><span className="thinking-label">{finalState.meta}</span><time>{event.timestamp}</time></div><div className="answer-card"><div className="answer-title"><span>{finalState.icon}</span><b>{finalState.title}</b><small>{event.steps} 个模型步骤</small></div><p className="answer-text">{event.text}</p></div></div></article>;
+      return <article className="agent-turn live-answer" key={index}><div className="avatar agent-avatar"><span>Y</span></div><div className="turn-body"><div className="turn-meta"><b>Yukai</b><span className="thinking-label">{finalState.meta}</span><time>{event.timestamp}</time></div><div className="answer-card"><div className="answer-title"><span>{finalState.icon}</span><b>{finalState.title}</b><small>{event.steps} 个模型步骤</small></div><MarkdownText text={event.text || ''} /></div></div></article>;
     }
     if (event.type === 'notice') return <div className="notice-row success" key={index}>{event.message}</div>;
     if (event.type === 'error') return <div className="connection-banner" key={index}>{event.error}</div>;
@@ -695,7 +706,7 @@ function PlanPanel({ plan }: { plan: TaskPlan }) {
       const proof = step.evidence_ids.map((id) => evidence.get(id)).filter(Boolean) as PlanEvidence[];
       return <div className={`plan-step ${step.status}`} key={step.id}>
         <span className="plan-status">{step.status === 'completed' ? '✓' : step.status === 'in_progress' ? '●' : step.status === 'blocked' ? '!' : '○'}</span>
-        <div><b>{step.title}</b><small>{step.status === 'completed' && proof.length ? `证据 · ${proof[0].summary}` : step.status === 'blocked' ? step.note : planStatusLabel(step.status)}</small></div>
+        <div><b>{step.title}</b><small>{step.status === 'completed' && proof.length ? `证据 · ${proof[0].summary}` : step.status === 'blocked' ? `${blockerTypeLabel(step.blocker_type)} · ${step.note}` : planStatusLabel(step.status)}</small>{step.status === 'blocked' && proof.length ? <small className="plan-blocker-evidence">阻塞证据 · {proof[0].summary}</small> : null}</div>
       </div>;
     })}</div>
   </section>;
@@ -813,6 +824,49 @@ function sessionTime(updatedAt: number) {
 function compact(value: string, limit: number) { const normalized = value.replace(/\s+/g, ' ').trim(); return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}…`; }
 function formatChars(value: number) { if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m chars`; if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k chars`; return `${value} chars`; }
 function planStatusLabel(status: PlanStep['status']) { return ({ pending: '等待执行', in_progress: '正在执行', completed: '证据已确认', blocked: '任务被阻塞' })[status]; }
+function blockerTypeLabel(type?: PlanStep['blocker_type']) { return ({ tool_failure: '工具执行失败', missing_prerequisite: '缺少前置条件', environment: '环境限制', user_input_required: '等待用户输入' } as Record<string, string>)[type || ''] || '任务被阻塞'; }
 function finalStatus(reason?: string) { if (reason === 'completed') return { icon: '✓', title: '完成', meta: '任务完成' }; if (reason === 'blocked') return { icon: '!', title: '任务被阻塞', meta: '需要处理' }; if (reason === 'incomplete_plan') return { icon: '!', title: '计划未完成', meta: '未完成' }; return { icon: '■', title: '任务已停止', meta: '已停止' }; }
+
+function MarkdownText({ text }: { text: string }) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const blocks: ReactNode[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) { index += 1; continue; }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      const Heading = heading[1].length === 1 ? 'h3' : heading[1].length === 2 ? 'h4' : 'h5';
+      blocks.push(<Heading key={`h-${index}`}>{renderInlineMarkdown(heading[2])}</Heading>);
+      index += 1;
+      continue;
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      const items: string[] = [];
+      while (index < lines.length && /^\s*[-*]\s+/.test(lines[index])) {
+        items.push(lines[index].replace(/^\s*[-*]\s+/, ''));
+        index += 1;
+      }
+      blocks.push(<ul key={`ul-${index}`}>{items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(item)}</li>)}</ul>);
+      continue;
+    }
+    const paragraph: string[] = [line];
+    index += 1;
+    while (index < lines.length && lines[index].trim() && !/^(#{1,3})\s+/.test(lines[index]) && !/^\s*[-*]\s+/.test(lines[index])) {
+      paragraph.push(lines[index]);
+      index += 1;
+    }
+    blocks.push(<p key={`p-${index}`}>{paragraph.map((item, itemIndex) => <span key={itemIndex}>{itemIndex > 0 && <br />}{renderInlineMarkdown(item)}</span>)}</p>);
+  }
+  return <div className="answer-markdown">{blocks}</div>;
+}
+
+function renderInlineMarkdown(text: string): ReactNode[] {
+  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean).map((part, index) => {
+    if (part.startsWith('**') && part.endsWith('**')) return <strong key={index}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith('`') && part.endsWith('`')) return <code key={index}>{part.slice(1, -1)}</code>;
+    return part;
+  });
+}
 function projectName(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) || path; }
 function now() { return new Date().toLocaleTimeString('zh-CN', { hour12: false }); }

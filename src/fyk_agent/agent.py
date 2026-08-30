@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
+import platform
 import queue
+import re
 import threading
 from typing import Any, Callable, Protocol
 
@@ -24,7 +27,9 @@ Work method:
 6. Do not claim a change or test succeeded unless a tool result proves it.
 7. Finish with a concise summary of changes, verification, and any remaining risk.
 8. Update the plan only when a stage changes. A completed step must cite compatible evidence IDs returned by actual tools.
-9. Do not finish while a plan has pending or in_progress steps. Mark an impossible step blocked with a concrete reason.
+9. Do not finish while a plan has pending or in_progress steps. A blocked step needs a concrete reason, a blocker_type, and execution evidence unless it explicitly waits for user input.
+10. Prefer native structured tools over shell directory traversal. Before package commands, confirm the manifest and requested script exist. Avoid unrelated version checks and compound commands.
+11. Describe the selected directory as the current workspace unless repository-root evidence proves otherwise. If blocked, say the task is not complete; never title the response as a completion summary.
 
 Safety:
 - All paths must be relative to the workspace.
@@ -87,7 +92,7 @@ class CodingAgent:
         self.notify("plan_reset", {"step": 0})
         if history is None:
             messages: list[dict[str, Any]] = [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": self._system_prompt()},
                 {"role": "user", "content": task.strip()},
             ]
         else:
@@ -153,8 +158,10 @@ class CodingAgent:
                         messages,
                         self.context.compactions,
                     )
-                final_text = reply.content.strip() or "Task ended without a textual response."
                 reason = "blocked" if self.plan.plan.blocked else "completed"
+                final_text = reply.content.strip() or "Task ended without a textual response."
+                if reason == "blocked":
+                    final_text = _blocked_final_text(final_text)
                 self.events.emit("run_finished", reason=reason, steps=step)
                 self.notify("finished", {"step": step, "reason": reason})
                 return RunResult(
@@ -267,6 +274,19 @@ class CodingAgent:
     def _model_tools(self) -> list[dict[str, Any]]:
         return [*self.tools.schemas, self.plan.schema]
 
+    def _system_prompt(self) -> str:
+        shell = os.environ.get("COMSPEC" if os.name == "nt" else "SHELL")
+        if not shell:
+            shell = "cmd.exe" if os.name == "nt" else "/bin/sh"
+        return (
+            SYSTEM_PROMPT
+            + "\nRuntime context (authoritative):\n"
+            + f"- Operating system: {platform.system() or os.name}\n"
+            + f"- Shell used by run_command: {shell}\n"
+            + f"- Current workspace: {self.tools.workspace.root}\n"
+            + "Choose commands valid for this operating system and shell."
+        )
+
     def _notify_context(self, messages: list[dict[str, Any]], *, step: int) -> None:
         self.notify(
             "context_stats",
@@ -307,6 +327,18 @@ def _assistant_message(reply: AssistantReply) -> dict[str, Any]:
     if reasoning_content:
         message["reasoning_content"] = reasoning_content
     return message
+
+
+def _blocked_final_text(text: str) -> str:
+    text = re.sub(
+        r"(?im)^\s*#{1,3}\s*(?:任务完成总结|完成总结|task complete(?:d)?(?: summary)?)\s*$",
+        "## 任务执行总结（存在阻塞）",
+        text,
+        count=1,
+    )
+    if text.startswith("任务未完成："):
+        return text
+    return "任务未完成：结构化计划中存在已确认的阻塞步骤。\n\n" + text
 
 
 def _parse_tool_call(

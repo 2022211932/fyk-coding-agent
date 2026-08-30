@@ -135,12 +135,49 @@ class PlanTrackerTests(unittest.TestCase):
                     "kind": "other",
                     "status": "blocked",
                     "note": "Required service is offline",
+                    "blocker_type": "user_input_required",
                 }
             ]
         )
         self.assertTrue(result["ok"])
         self.assertTrue(result["plan"]["terminal"])
         self.assertTrue(result["plan"]["blocked"])
+
+    def test_non_user_blocker_requires_failed_execution_evidence(self) -> None:
+        without_evidence = self.update(
+            [
+                {
+                    "id": "blocked",
+                    "title": "Run tests",
+                    "kind": "verify",
+                    "status": "blocked",
+                    "note": "The command failed",
+                    "blocker_type": "tool_failure",
+                }
+            ]
+        )
+        self.assertFalse(without_evidence["ok"])
+        evidence_id = self.tracker.register_evidence(
+            "run_command",
+            {"command": "npm test"},
+            {"ok": False, "error_type": "missing_project_manifest"},
+            step=2,
+        )
+        blocked = self.update(
+            [
+                {
+                    "id": "blocked",
+                    "title": "Run tests",
+                    "kind": "verify",
+                    "status": "blocked",
+                    "note": "package.json is missing",
+                    "blocker_type": "missing_prerequisite",
+                    "evidence_ids": [evidence_id],
+                }
+            ]
+        )
+        self.assertTrue(blocked["ok"], blocked)
+        self.assertEqual(blocked["plan"]["evidence"][0]["error_type"], "missing_project_manifest")
 
 
 if __name__ == "__main__":

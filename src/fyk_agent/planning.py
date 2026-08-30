@@ -7,8 +7,9 @@ from typing import Any
 
 PLAN_STATUSES = {"pending", "in_progress", "completed", "blocked"}
 PLAN_KINDS = {"inspect", "change", "verify", "other"}
+BLOCKER_TYPES = {"tool_failure", "missing_prerequisite", "environment", "user_input_required"}
 KIND_TOOLS = {
-    "inspect": {"list_files", "read_file", "search_text"},
+    "inspect": {"get_environment", "list_files", "read_file", "search_text"},
     "change": {"write_file", "edit_file", "make_directory"},
     "verify": {"run_command"},
 }
@@ -26,6 +27,7 @@ class Evidence:
     summary: str
     step: int
     verification: bool = False
+    error_type: str = ""
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -35,6 +37,7 @@ class Evidence:
             "summary": self.summary,
             "step": self.step,
             "verification": self.verification,
+            "error_type": self.error_type,
         }
 
 
@@ -46,6 +49,7 @@ class PlanStep:
     status: str
     evidence_ids: tuple[str, ...] = ()
     note: str = ""
+    blocker_type: str = ""
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -55,6 +59,7 @@ class PlanStep:
             "status": self.status,
             "evidence_ids": list(self.evidence_ids),
             "note": self.note,
+            "blocker_type": self.blocker_type,
         }
 
 
@@ -97,6 +102,7 @@ class PlanTracker:
             "description": (
                 "Create or update the user-visible task plan for a multi-step task. "
                 "A completed step must cite compatible evidence IDs returned by successful tools. "
+                "A blocked step must declare a blocker_type and cite evidence unless it is waiting for user input. "
                 "Use inspect for repository investigation, change for file changes, verify for "
                 "tests/builds, and other only when none of those categories fit."
             ),
@@ -121,6 +127,10 @@ class PlanTracker:
                                     "maxItems": 20,
                                 },
                                 "note": {"type": "string", "maxLength": 300},
+                                "blocker_type": {
+                                    "type": "string",
+                                    "enum": sorted(BLOCKER_TYPES),
+                                },
                             },
                             "required": ["id", "title", "kind", "status"],
                             "additionalProperties": False,
@@ -169,6 +179,7 @@ class PlanTracker:
             step=step,
             verification=tool == "run_command"
             and _is_verification_command(str(arguments.get("command", ""))),
+            error_type=str(result.get("error_type", "")),
         )
         return evidence_id
 
@@ -242,23 +253,67 @@ class PlanTracker:
         if status == "completed" and not evidence_ids and old_step is not None:
             evidence_ids = old_step.evidence_ids
         note = str(raw.get("note", "")).strip()[:300]
-        if status == "blocked" and not note:
-            raise PlanError(f"blocked step {step_id} requires a note")
+        blocker_type = str(raw.get("blocker_type", "")).strip()
+        if status == "blocked":
+            if not note:
+                raise PlanError(f"blocked step {step_id} requires a note")
+            if blocker_type not in BLOCKER_TYPES:
+                raise PlanError(f"blocked step {step_id} requires a valid blocker_type")
+            if blocker_type != "user_input_required" and not evidence_ids:
+                raise PlanError(f"blocked step {step_id} requires evidence_ids")
+            if evidence_ids:
+                self._validate_blocker_evidence(step_id, blocker_type, evidence_ids)
+        elif blocker_type:
+            raise PlanError(f"non-blocked step {step_id} cannot declare blocker_type")
         if status == "completed":
             if not evidence_ids:
                 raise PlanError(f"completed step {step_id} requires evidence_ids")
             self._validate_evidence(step_id, kind, evidence_ids)
-        return PlanStep(step_id, title, kind, status, evidence_ids, note)
+        return PlanStep(step_id, title, kind, status, evidence_ids, note, blocker_type)
 
-    def _validate_evidence(
-        self, step_id: str, kind: str, evidence_ids: tuple[str, ...]
-    ) -> None:
+    def _evidence_records(
+        self, step_id: str, evidence_ids: tuple[str, ...]
+    ) -> list[Evidence]:
         records: list[Evidence] = []
         for evidence_id in evidence_ids:
             evidence = self.evidence.get(evidence_id)
             if evidence is None:
                 raise PlanError(f"unknown evidence ID for {step_id}: {evidence_id}")
             records.append(evidence)
+        return records
+
+    def _validate_blocker_evidence(
+        self, step_id: str, blocker_type: str, evidence_ids: tuple[str, ...]
+    ) -> None:
+        records = self._evidence_records(step_id, evidence_ids)
+        if blocker_type == "user_input_required":
+            return
+        if blocker_type == "tool_failure" and not any(not record.ok for record in records):
+            raise PlanError(f"tool_failure blocker {step_id} requires failed tool evidence")
+        if blocker_type == "missing_prerequisite" and not any(
+            (not record.ok and record.error_type in {
+                "missing_project_manifest",
+                "missing_package_script",
+                "invalid_project_manifest",
+                "FileNotFoundError",
+                "WorkspaceError",
+                "ToolError",
+            })
+            or (record.ok and record.tool in KIND_TOOLS["inspect"])
+            for record in records
+        ):
+            raise PlanError(
+                f"missing_prerequisite blocker {step_id} requires inspection or missing-prerequisite evidence"
+            )
+        if blocker_type == "environment" and not any(
+            record.tool == "get_environment" or not record.ok for record in records
+        ):
+            raise PlanError(f"environment blocker {step_id} requires environment or failed tool evidence")
+
+    def _validate_evidence(
+        self, step_id: str, kind: str, evidence_ids: tuple[str, ...]
+    ) -> None:
+        records = self._evidence_records(step_id, evidence_ids)
         compatible_tools = KIND_TOOLS.get(kind)
         compatible = [
             record
