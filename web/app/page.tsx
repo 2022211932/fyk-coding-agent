@@ -67,6 +67,7 @@ export default function Home() {
   const [switchingWorkspace, setSwitchingWorkspace] = useState(false);
   const [openSessionMenu, setOpenSessionMenu] = useState<string | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState<string | null>(null);
+  const [sessionActionError, setSessionActionError] = useState<{ id: string; message: string } | null>(null);
   const connection = useRef({ api: '', token: '' });
   const timelineEnd = useRef<HTMLDivElement>(null);
 
@@ -96,6 +97,9 @@ export default function Home() {
     if (!live || running) return;
     const session = createConversationSession();
     setConversationStore((previous) => ({ items: [session, ...previous.items], activeId: session.id }));
+    setOpenSessionMenu(null);
+    setDeleteConfirmation(null);
+    setSessionActionError(null);
     setApproval(null);
     setPrompt('');
   }
@@ -105,6 +109,7 @@ export default function Home() {
     setConversationStore((previous) => ({ ...previous, activeId: targetId }));
     setOpenSessionMenu(null);
     setDeleteConfirmation(null);
+    setSessionActionError(null);
     setApproval(null);
     setPrompt('');
   }
@@ -112,11 +117,13 @@ export default function Home() {
   function toggleSessionMenu(targetId: string) {
     setOpenSessionMenu((current) => current === targetId ? null : targetId);
     setDeleteConfirmation(null);
+    setSessionActionError(null);
   }
 
   function togglePinned(targetId: string) {
     updateSession(targetId, (session) => ({ ...session, pinned: !session.pinned }));
     setOpenSessionMenu(null);
+    setSessionActionError(null);
   }
 
   function toggleArchived(targetId: string) {
@@ -139,6 +146,7 @@ export default function Home() {
     });
     setOpenSessionMenu(null);
     setDeleteConfirmation(null);
+    setSessionActionError(null);
     setApproval(null);
     setPrompt('');
   }
@@ -146,15 +154,23 @@ export default function Home() {
   async function deleteSession(targetId: string) {
     if (deleteConfirmation !== targetId) {
       setDeleteConfirmation(targetId);
+      setSessionActionError(null);
       return;
     }
     const { api, token } = connection.current;
     try {
-      const response = await fetch(`${api}/api/sessions/delete`, {
+      let response = await fetch(`${api}/api/sessions/delete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
         body: JSON.stringify({ session_id: targetId }),
       });
+      if (response.status === 404) {
+        response = await fetch(`${api}/api/clear`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
+          body: JSON.stringify({ session_id: targetId }),
+        });
+      }
       if (!response.ok) throw new Error('无法删除该会话');
       setConversationStore((previous) => {
         let items = previous.items.filter((session) => session.id !== targetId);
@@ -172,10 +188,13 @@ export default function Home() {
       });
       setOpenSessionMenu(null);
       setDeleteConfirmation(null);
+      setSessionActionError(null);
+      setConnectionError('');
       setApproval(null);
       setPrompt('');
     } catch (error) {
-      setConnectionError(error instanceof Error ? error.message : '无法删除该会话');
+      setDeleteConfirmation(null);
+      setSessionActionError({ id: targetId, message: error instanceof Error ? error.message : '无法删除该会话' });
     }
   }
 
@@ -210,11 +229,13 @@ export default function Home() {
       if (event.target instanceof Element && event.target.closest('[data-session-menu]')) return;
       setOpenSessionMenu(null);
       setDeleteConfirmation(null);
+      setSessionActionError(null);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setOpenSessionMenu(null);
         setDeleteConfirmation(null);
+        setSessionActionError(null);
       }
     };
     document.addEventListener('mousedown', closeMenu);
@@ -421,13 +442,13 @@ export default function Home() {
           <button className="new-session" type="button" onClick={startNewSession} disabled={!live || running}><span>＋</span> 新建会话</button>
           <p className="rail-label">最近任务</p>
           <nav aria-label="最近任务">
-            {live ? recentSessions.map((session) => <SessionListItem key={session.id} session={session} active={session.id === sessionId} running={running} time={session.id === sessionId && running ? '运行中' : sessionTime(session.updatedAt)} menuOpen={openSessionMenu === session.id} confirmingDelete={deleteConfirmation === session.id} onSelect={switchSession} onToggleMenu={toggleSessionMenu} onTogglePinned={togglePinned} onToggleArchived={toggleArchived} onDelete={deleteSession} />) : demoSessions.map((session) => (
+            {live ? recentSessions.map((session) => <SessionListItem key={session.id} session={session} active={session.id === sessionId} running={running} time={session.id === sessionId && running ? '运行中' : sessionTime(session.updatedAt)} menuOpen={openSessionMenu === session.id} confirmingDelete={deleteConfirmation === session.id} menuError={sessionActionError?.id === session.id ? sessionActionError.message : ''} onSelect={switchSession} onToggleMenu={toggleSessionMenu} onTogglePinned={togglePinned} onToggleArchived={toggleArchived} onDelete={deleteSession} />) : demoSessions.map((session) => (
               <button key={session.title} type="button" className={`session-item ${session.active ? 'active' : ''}`}>
                 <span className="session-glyph">{session.active ? '●' : '○'}</span><span className="session-copy"><b>{session.title}</b><small>{session.time}</small></span>
               </button>
             ))}
           </nav>
-          {live && archivedSessions.length > 0 && <><p className="rail-label archived-label">已归档</p><nav aria-label="已归档任务">{archivedSessions.map((session) => <SessionListItem key={session.id} session={session} active={session.id === sessionId} running={running} time={sessionTime(session.updatedAt)} menuOpen={openSessionMenu === session.id} confirmingDelete={deleteConfirmation === session.id} onSelect={switchSession} onToggleMenu={toggleSessionMenu} onTogglePinned={togglePinned} onToggleArchived={toggleArchived} onDelete={deleteSession} />)}</nav></>}
+          {live && archivedSessions.length > 0 && <><p className="rail-label archived-label">已归档</p><nav aria-label="已归档任务">{archivedSessions.map((session) => <SessionListItem key={session.id} session={session} active={session.id === sessionId} running={running} time={sessionTime(session.updatedAt)} menuOpen={openSessionMenu === session.id} confirmingDelete={deleteConfirmation === session.id} menuError={sessionActionError?.id === session.id ? sessionActionError.message : ''} onSelect={switchSession} onToggleMenu={toggleSessionMenu} onTogglePinned={togglePinned} onToggleArchived={toggleArchived} onDelete={deleteSession} />)}</nav></>}
           <div className="rail-bottom"><div><span className="kbd">↶</span><span>撤销修改</span><span className="shortcut">UNDO</span></div><div><span className="kbd">?</span><span>{live ? '本地安全连接' : '演示模式'}</span></div></div>
         </aside>
 
@@ -470,13 +491,14 @@ export default function Home() {
   );
 }
 
-function SessionListItem({ session, active, running, time, menuOpen, confirmingDelete, onSelect, onToggleMenu, onTogglePinned, onToggleArchived, onDelete }: {
+function SessionListItem({ session, active, running, time, menuOpen, confirmingDelete, menuError, onSelect, onToggleMenu, onTogglePinned, onToggleArchived, onDelete }: {
   session: ConversationSession;
   active: boolean;
   running: boolean;
   time: string;
   menuOpen: boolean;
   confirmingDelete: boolean;
+  menuError: string;
   onSelect: (id: string) => void;
   onToggleMenu: (id: string) => void;
   onTogglePinned: (id: string) => void;
@@ -493,6 +515,7 @@ function SessionListItem({ session, active, running, time, menuOpen, confirmingD
       <button type="button" role="menuitem" onClick={() => onTogglePinned(session.id)}><span>◆</span>{session.pinned ? '取消置顶' : '置顶'}</button>
       <button type="button" role="menuitem" onClick={() => onToggleArchived(session.id)}><span>▣</span>{session.archived ? '取消归档' : '归档'}</button>
       <button type="button" role="menuitem" className={`delete ${confirmingDelete ? 'confirming' : ''}`} onClick={() => onDelete(session.id)}><span>×</span>{confirmingDelete ? '再次点击确认' : '删除'}</button>
+      {menuError && <p className="session-menu-error">{menuError}</p>}
     </div>}
   </div>;
 }

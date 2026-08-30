@@ -64,12 +64,13 @@ button { color: inherit; }
 .session-row:hover .session-more, .session-row.active .session-more, .session-more[aria-expanded="true"] { opacity: 1; }
 .session-more:hover:not(:disabled), .session-more[aria-expanded="true"] { color: var(--mint); background: rgba(100,230,194,.09); }
 .session-more:disabled { cursor: default; }
-.session-menu { position: absolute; z-index: 40; right: 5px; top: calc(50% + 19px); width: 132px; display: grid; gap: 2px; padding: 5px; border: 1px solid #2a3741; border-radius: 9px; background: #121920; box-shadow: 0 16px 38px rgba(0,0,0,.48); animation: menu-in .12s ease-out; }
+.session-menu { position: absolute; z-index: 40; right: 5px; top: calc(50% + 19px); width: 144px; display: grid; gap: 2px; padding: 5px; border: 1px solid #2a3741; border-radius: 9px; background: #121920; box-shadow: 0 16px 38px rgba(0,0,0,.48); animation: menu-in .12s ease-out; }
 .session-menu button { display: grid; grid-template-columns: 17px 1fr; gap: 6px; align-items: center; border: 0; border-radius: 6px; padding: 7px 8px; background: transparent; color: #aeb9bf; text-align: left; font-size: 9px; cursor: pointer; }
 .session-menu button:hover { color: var(--text); background: #1a232c; }
 .session-menu button > span { color: var(--faint); text-align: center; }
 .session-menu button.delete { color: #e79791; }
 .session-menu button.delete:hover, .session-menu button.delete.confirming { color: #ffc0bb; background: rgba(255,120,109,.1); }
+.session-menu-error { margin: 3px 4px 2px; padding-top: 6px; border-top: 1px solid rgba(255,120,109,.18); color: #e79791; font-size: 8px; line-height: 1.45; }
 .archived-label { margin-top: 15px; }
 .rail-bottom { margin-top: auto; border-top: 1px solid var(--line-soft); padding: 12px 5px 0; display: grid; gap: 5px; }
 .rail-bottom > div { display: grid; grid-template-columns: 21px 1fr auto; align-items: center; color: var(--faint); font-size: 10px; padding: 6px; }
