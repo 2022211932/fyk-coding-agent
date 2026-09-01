@@ -424,7 +424,7 @@ def run_web_console(
 
 def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "YukaiWeb/0.3.1"
+        server_version = "YukaiWeb/0.3.2"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return

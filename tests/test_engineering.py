@@ -42,6 +42,7 @@ class EngineeringWorkflowTests(unittest.TestCase):
             {
                 "action": "define_requirements",
                 "project_title": "示例系统",
+                "assumptions": ["默认仅支持网页登录"],
                 "requirements": REQUIREMENTS,
             },
             {},
@@ -51,6 +52,11 @@ class EngineeringWorkflowTests(unittest.TestCase):
         restored = EngineeringWorkflow(self.root).payload()
         self.assertEqual(restored["project_title"], "示例系统")
         self.assertEqual(len(restored["requirements"]), 2)
+        self.assertEqual(restored["assumptions"], ["默认仅支持网页登录"])
+        requirements_document = (
+            self.root / ".yukai/engineering/requirements.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("待确认的默认决策与假设", requirements_document)
         self.assertFalse(restored["phases"][0]["gate"]["passed"])
 
     def test_user_decision_controls_requirements_gate(self) -> None:
@@ -67,6 +73,10 @@ class EngineeringWorkflowTests(unittest.TestCase):
         }
         requested = self.workflow.request_user_input(question)
         self.assertTrue(requested["awaiting_user"])
+        baseline = requested["question"]["baseline_review"]
+        self.assertEqual([item["id"] for item in baseline["requirements"]], ["FR-001", "NFR-001"])
+        self.assertEqual(baseline["requirements"][0]["acceptance_criteria"], REQUIREMENTS[0]["acceptance_criteria"])
+        self.assertEqual(len(baseline["digest"]), 64)
         self.workflow.answer_question("baseline-1", option_id="revise")
         rejected = self.workflow.update(
             {"action": "advance_phase", "target_phase": "design"}, {}
@@ -80,6 +90,25 @@ class EngineeringWorkflowTests(unittest.TestCase):
         )
         self.assertTrue(accepted["ok"])
         self.assertEqual(self.workflow.payload()["phase"], "design")
+
+    def test_changing_requirements_invalidates_pending_baseline_card(self) -> None:
+        self.workflow.update({"action": "define_requirements", "requirements": REQUIREMENTS}, {})
+        self.workflow.request_user_input(
+            {
+                "question_id": "old-baseline",
+                "decision_key": "requirements_baseline",
+                "question": "确认需求？",
+                "reason": "进入设计。",
+                "options": [{"id": "approve", "label": "确认"}, {"id": "revise", "label": "修改"}],
+            }
+        )
+        changed = [dict(REQUIREMENTS[0]), dict(REQUIREMENTS[1])]
+        changed[0]["title"] = "更新后的用户登录"
+        self.workflow.update({"action": "define_requirements", "requirements": changed}, {})
+
+        self.assertIsNone(self.workflow.payload()["pending_question"])
+        with self.assertRaisesRegex(EngineeringError, "no longer pending"):
+            self.workflow.answer_question("old-baseline", option_id="approve")
 
     def test_traceability_links_require_compatible_evidence(self) -> None:
         self.workflow.update({"action": "define_requirements", "requirements": REQUIREMENTS}, {})

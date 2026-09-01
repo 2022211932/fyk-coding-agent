@@ -104,7 +104,9 @@ class CodingAgent:
         else:
             if not history or history[0].get("role") != "system":
                 raise ValueError("Conversation history must begin with a system message")
-            messages = [dict(message) for message in history]
+            messages = _history_for_mode(
+                history, engineering_mode=self.engineering is not None
+            )
             messages[0] = {"role": "system", "content": self._system_prompt()}
             messages.append({"role": "user", "content": task.strip()})
         self.events.emit(
@@ -198,9 +200,12 @@ class CodingAgent:
                 elif name == "update_plan":
                     if self.engineering is not None:
                         result = {
-                            "ok": False,
-                            "error": "Yukai-SE uses the engineering lifecycle as its single plan; update_plan is disabled",
-                            "error_type": "engineering_plan_is_authoritative",
+                            "ok": True,
+                            "ignored": True,
+                            "message": (
+                                "Ignored update_plan because Yukai-SE's engineering lifecycle is the authoritative plan"
+                            ),
+                            "engineering": self.engineering.payload(),
                         }
                     else:
                         result = self.plan.update(arguments)
@@ -492,3 +497,39 @@ def _append_skipped_tool_results(
                 ),
             }
         )
+
+
+def _history_for_mode(
+    history: list[dict[str, Any]], *, engineering_mode: bool
+) -> list[dict[str, Any]]:
+    """Remove internal tool protocol from the other mode while preserving conversation content."""
+    forbidden = (
+        {"update_plan"}
+        if engineering_mode
+        else {"update_engineering_state", "request_user_input"}
+    )
+    removed_call_ids: set[str] = set()
+    compatible: list[dict[str, Any]] = []
+    for source in history:
+        message = dict(source)
+        if message.get("role") == "assistant" and isinstance(message.get("tool_calls"), list):
+            allowed_calls = []
+            for call in message["tool_calls"]:
+                name = str((call.get("function") or {}).get("name", ""))
+                if name in forbidden:
+                    removed_call_ids.add(str(call.get("id", "")))
+                else:
+                    allowed_calls.append(call)
+            if allowed_calls:
+                message["tool_calls"] = allowed_calls
+            else:
+                message.pop("tool_calls", None)
+            if not allowed_calls and not str(message.get("content") or "").strip():
+                continue
+        if message.get("role") == "tool" and (
+            str(message.get("tool_call_id", "")) in removed_call_ids
+            or str(message.get("name", "")) in forbidden
+        ):
+            continue
+        compatible.append(message)
+    return compatible

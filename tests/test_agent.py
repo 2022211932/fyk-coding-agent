@@ -285,6 +285,69 @@ class AgentLoopTests(unittest.TestCase):
         self.assertNotIn("update_plan", tool_names)
         self.assertIn("update_engineering_state", tool_names)
 
+    def test_switching_to_engineering_filters_quick_mode_plan_protocol(self) -> None:
+        old_plan_call = {
+            "id": "old-plan",
+            "type": "function",
+            "function": {"name": "update_plan", "arguments": "{}"},
+        }
+        history = [
+            {"role": "system", "content": "old system"},
+            {"role": "user", "content": "先前任务"},
+            {"role": "assistant", "content": None, "tool_calls": [old_plan_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "old-plan",
+                "name": "update_plan",
+                "content": '{"ok": true}',
+            },
+            {"role": "assistant", "content": "旧的快速模式运行已结束。"},
+        ]
+        client = FakeClient(
+            [AssistantReply("继续工程流程", [], {"role": "assistant", "content": "继续工程流程"})]
+        )
+        CodingAgent(
+            client,
+            self.registry,
+            engineering=EngineeringWorkflow(self.registry.workspace.root),
+        ).run("重新执行", history=history)
+
+        request = client.requests[0]
+        self.assertFalse(
+            any(message.get("role") == "tool" and message.get("name") == "update_plan" for message in request)
+        )
+        self.assertFalse(
+            any(
+                call.get("function", {}).get("name") == "update_plan"
+                for message in request
+                for call in message.get("tool_calls", [])
+            )
+        )
+        self.assertTrue(any(message.get("content") == "旧的快速模式运行已结束。" for message in request))
+
+    def test_hallucinated_quick_plan_update_is_ignored_in_engineering_mode(self) -> None:
+        client = FakeClient(
+            [
+                named_tool_reply(
+                    "update_plan",
+                    {"summary": "旧计划", "steps": []},
+                    "unexpected-plan",
+                ),
+                AssistantReply("继续工程流程", [], {"role": "assistant", "content": "继续工程流程"}),
+            ]
+        )
+        result = CodingAgent(
+            client,
+            self.registry,
+            engineering=EngineeringWorkflow(self.registry.workspace.root),
+        ).run("执行工程任务")
+
+        self.assertEqual(result.stop_reason, "completed")
+        ignored = client.requests[1][-1]["content"]
+        self.assertIn('"ok": true', ignored)
+        self.assertIn('"ignored": true', ignored)
+        self.assertNotIn("engineering_plan_is_authoritative", ignored)
+
     def test_acceptance_completion_stops_remaining_file_writes(self) -> None:
         workflow = EngineeringWorkflow(self.registry.workspace.root)
         requirement = {

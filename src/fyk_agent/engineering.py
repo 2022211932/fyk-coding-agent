@@ -112,6 +112,15 @@ class EngineeringWorkflow:
                             "additionalProperties": False,
                         },
                     },
+                    "assumptions": {
+                        "type": "array",
+                        "maxItems": 20,
+                        "description": (
+                            "Default decisions or assumptions that materially define the requirements baseline. "
+                            "They will be shown to the user together with the full requirements before approval."
+                        ),
+                        "items": {"type": "string", "minLength": 1, "maxLength": 500},
+                    },
                     "modules": {
                         "type": "array",
                         "maxItems": 40,
@@ -135,6 +144,11 @@ class EngineeringWorkflow:
                     "links": {
                         "type": "array",
                         "maxItems": 80,
+                        "description": (
+                            "For link_tests, inspection evidence must come from read_file, search_text, "
+                            "list_files, or get_environment. Test evidence must come from a successful "
+                            "verification command; never label run_command evidence as inspection."
+                        ),
                         "items": {
                             "type": "object",
                             "properties": {
@@ -339,6 +353,7 @@ class EngineeringWorkflow:
             "status": state["status"],
             "project_title": state["project_title"],
             "requirements": state["requirements"],
+            "assumptions": state["assumptions"],
             "design_modules": state["design_modules"],
             "implementation_links": state["implementation_links"],
             "test_links": state["test_links"],
@@ -357,7 +372,11 @@ class EngineeringWorkflow:
             "A user question must be the last action of the turn. Phases advance automatically after their "
             "gate passes, so inspect the returned engineering.phase before attempting advance_phase. For every "
             "verification link, state the evidence_kind, the exact claim, and which 1-based acceptance criteria "
-            "it proves. Never claim zero residual risk; describe the boundary of the verified baseline.\n"
+            "it proves. Inspection evidence only comes from read_file, search_text, list_files, or "
+            "get_environment; never label run_command as inspection. Record every material default in the "
+            "assumptions field of define_requirements so it appears on the baseline review card. The engineering "
+            "lifecycle remains authoritative even if older conversation history mentions update_plan. Never claim "
+            "zero residual risk; describe the boundary of the verified baseline.\n"
             "Current engineering state:\n"
             + json.dumps(compact, ensure_ascii=False, default=str)
         )
@@ -452,6 +471,12 @@ class EngineeringWorkflow:
                     "affected_requirement_ids": [str(item) for item in affected],
                     "asked_at": _now(),
                 }
+                if decision_key == "requirements_baseline":
+                    question_value["baseline_review"] = {
+                        "requirements": deepcopy(self._state["requirements"]),
+                        "assumptions": list(self._state["assumptions"]),
+                        "digest": self._requirements_digest(),
+                    }
                 if decision_key == "project_acceptance":
                     question_value["review_summary"] = self._review_summary()
                 self._state["pending_question"] = question_value
@@ -474,12 +499,21 @@ class EngineeringWorkflow:
             )
             if option is None:
                 raise EngineeringError("the selected option does not belong to this question")
+            if (
+                pending.get("decision_key") == "requirements_baseline"
+                and option_id.lower() in APPROVAL_OPTION_IDS
+                and pending.get("baseline_review", {}).get("digest") != self._requirements_digest()
+            ):
+                raise EngineeringError(
+                    "the requirements changed after this confirmation card was created; review the refreshed baseline"
+                )
             decision = {
                 "key": pending["decision_key"],
                 "question_id": question_id,
                 "option_id": option_id,
                 "option_label": option["label"],
                 "answer": answer.strip()[:1000],
+                "baseline_digest": pending.get("baseline_review", {}).get("digest", ""),
                 "decided_at": _now(),
             }
             self._state["decisions"] = [
@@ -532,12 +566,22 @@ class EngineeringWorkflow:
             )
         if len({item["id"] for item in requirements}) != len(requirements):
             raise EngineeringError("requirement IDs must be unique")
+        raw_assumptions = arguments.get("assumptions", [])
+        if not isinstance(raw_assumptions, list):
+            raise EngineeringError("assumptions must be an array")
+        assumptions = [
+            _text(value, "requirement assumption", 500) for value in raw_assumptions
+        ]
         self._state["project_title"] = str(arguments.get("project_title") or self._state["project_title"]).strip()[:120]
+        self._state["assumptions"] = assumptions
         self._state["requirements"] = requirements
         self._state["design_modules"] = []
         self._state["implementation_links"] = []
         self._state["test_links"] = []
         self._invalidate_decisions("requirements_baseline", "project_acceptance")
+        pending = self._state.get("pending_question")
+        if isinstance(pending, dict) and pending.get("decision_key") == "requirements_baseline":
+            self._state["pending_question"] = None
         self._state["status"] = "active"
 
     def _define_design(self, arguments: dict[str, Any]) -> None:
@@ -790,6 +834,16 @@ class EngineeringWorkflow:
             ),
         }
 
+    def _requirements_digest(self) -> str:
+        payload = {
+            "requirements": self._state["requirements"],
+            "assumptions": self._state["assumptions"],
+        }
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
     def _advance_phase(self, arguments: dict[str, Any]) -> None:
         target = str(arguments.get("target_phase", ""))
         if target not in PHASES:
@@ -931,6 +985,15 @@ class EngineeringWorkflow:
                     "",
                 ]
             )
+        if self._state["assumptions"]:
+            requirements.extend(
+                [
+                    "## 待确认的默认决策与假设",
+                    "",
+                    *[f"- {item}" for item in self._state["assumptions"]],
+                    "",
+                ]
+            )
         design = ["# 结构化设计说明", ""]
         for module in self._state["design_modules"]:
             design.extend(
@@ -980,6 +1043,7 @@ def _default_state() -> dict[str, Any]:
         "phase": "requirements",
         "status": "active",
         "requirements": [],
+        "assumptions": [],
         "design_modules": [],
         "implementation_links": [],
         "test_links": [],
@@ -1020,6 +1084,10 @@ def _next_action(error: str, phase: str) -> str:
         return "Retry define_design with module IDs like MOD-001 and MOD-002."
     if "criterion_indices" in error:
         return "Retry link_tests with evidence_kind, claim, and 1-based criterion_indices for each requirement."
+    if "inspection evidence" in error:
+        return "Run read_file, search_text, list_files, or get_environment, then link that evidence as inspection."
+    if "successful verification command" in error:
+        return "Run the relevant test command successfully, then link its evidence with the matching test evidence_kind."
     if "move to the" in error:
         return f"Inspect engineering.phase (currently {phase}); phases normally advance automatically after a complete gate."
     if "quality gate failed" in error:

@@ -34,7 +34,9 @@ type PlanStep = { id: string; title: string; kind: 'inspect' | 'change' | 'verif
 type TaskPlan = { summary: string; steps: PlanStep[]; completed: number; total: number; terminal: boolean; blocked: boolean; evidence: PlanEvidence[] };
 type EngineeringOption = { id: string; label: string; description?: string };
 type EngineeringReview = { requirements: number; design_modules: number; implementation_links: number; verification_links: number; stale_evidence: number; residual_risk: string };
-type EngineeringQuestion = { question_id: string; decision_key: string; question: string; reason: string; options: EngineeringOption[]; review_summary?: EngineeringReview };
+type EngineeringRequirement = { id: string; title: string; kind: 'functional' | 'non_functional'; description: string; acceptance_criteria: string[] };
+type EngineeringBaselineReview = { requirements: EngineeringRequirement[]; assumptions: string[]; digest: string };
+type EngineeringQuestion = { question_id: string; decision_key: string; question: string; reason: string; options: EngineeringOption[]; baseline_review?: EngineeringBaselineReview; review_summary?: EngineeringReview };
 type EngineeringPhase = { id: string; title: string; status: 'pending' | 'active' | 'awaiting_user' | 'completed'; gate: { passed: boolean; missing: string[] } };
 type EngineeringState = {
   phase: string;
@@ -608,7 +610,7 @@ export default function Home() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>Yukai</span><span className="version">v{status?.version || '0.3.1'}</span></div>
+        <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>Yukai</span><span className="version">v{status?.version || '0.3.2'}</span></div>
         <button className="workspace-pill" type="button" onClick={openProjectPicker} disabled={!live || running} title="选择本地主机上的项目"><span className={`status-dot ${connectionError ? 'offline' : ''}`} /><span className="workspace-path">{live ? compact(status.workspace, 52) : 'Demo · demo-workspace'}</span><span className="workspace-chevron">⌄</span></button>
         <div className="top-actions"><button className="icon-button" aria-label="撤销最近修改" onClick={undo}>↶</button><div className="model-chip"><span>◆</span> {status?.model || 'DeepSeek V4 Pro'}</div></div>
       </header>
@@ -725,7 +727,7 @@ function LiveTimeline({ events, running, onAnswerQuestion }: { events: AgentEven
     if (event.type === 'engineering_state') return null;
     if (event.type === 'engineering_question' && event.question) {
       const active = currentQuestionId === event.question.question_id;
-      return <article className={`engineering-question ${active ? 'active' : 'resolved'}`} key={index}><p className="eyebrow">ENGINEERING DECISION</p><h3>{event.question.question}</h3><p>{event.question.reason}</p>{event.question.review_summary && <EngineeringReviewSummary review={event.question.review_summary} />}<div>{event.question.options.map((option) => <button type="button" key={option.id} disabled={!active || running} onClick={() => onAnswerQuestion(event.question as EngineeringQuestion, option)}><b>{option.label}</b>{option.description && <small>{option.description}</small>}</button>)}</div>{!active && <small className="question-resolved">该决策已记录</small>}</article>;
+      return <article className={`engineering-question ${active ? 'active' : 'resolved'}`} key={index}><p className="eyebrow">ENGINEERING DECISION</p><h3>{event.question.question}</h3><p>{event.question.reason}</p>{event.question.baseline_review && <EngineeringBaselineReviewPanel review={event.question.baseline_review} />}{event.question.review_summary && <EngineeringReviewSummary review={event.question.review_summary} />}<div>{event.question.options.map((option) => <button type="button" key={option.id} disabled={!active || running} onClick={() => onAnswerQuestion(event.question as EngineeringQuestion, option)}><b>{option.label}</b>{option.description && <small>{option.description}</small>}</button>)}</div>{!active && <small className="question-resolved">该决策已记录</small>}</article>;
     }
     if (event.type === 'final') {
       const finalState = finalStatus(event.stop_reason);
@@ -744,6 +746,8 @@ function ToolResult({ event }: { event: AgentEvent }) {
   const plan = result.plan as TaskPlan | undefined;
   const detail = result.unchanged
     ? '内容没有变化，已跳过写入'
+    : result.ignored
+    ? '软件工程模式已忽略普通计划更新'
     : plan
     ? `${plan.completed}/${plan.total} 个步骤已完成`
     : result.duration_ms
@@ -753,11 +757,24 @@ function ToolResult({ event }: { event: AgentEvent }) {
       : result.exit_code !== undefined
         ? `exit ${result.exit_code}`
         : '';
-  return <div className={`tool-result-row ${ok ? 'ok' : 'failed'}`}><span>{ok ? '✓' : '×'}</span><div><b>{ok ? '执行成功' : '执行失败'} · {event.tool}</b><small>{detail}</small>{output && <pre>{compact(output, 1600)}</pre>}</div></div>;
+  return <div className={`tool-result-row ${ok ? 'ok' : 'failed'}`}><span>{ok ? '✓' : '×'}</span><div><b>{ok ? '执行成功' : '执行失败'} · {event.tool}</b><small>{detail}</small>{result.next_action && <small className="tool-guidance">建议：{String(result.next_action)}</small>}{output && <pre>{compact(output, 1600)}</pre>}</div></div>;
 }
 
 function EngineeringReviewSummary({ review }: { review: EngineeringReview }) {
   return <div className="engineering-review"><div><b>{review.requirements}</b><small>需求</small></div><div><b>{review.design_modules}</b><small>模块</small></div><div><b>{review.verification_links}</b><small>验证证据</small></div><div className={review.stale_evidence ? 'warning' : ''}><b>{review.stale_evidence}</b><small>过期证据</small></div><p><b>剩余风险</b>{review.residual_risk}</p></div>;
+}
+
+function EngineeringBaselineReviewPanel({ review }: { review: EngineeringBaselineReview }) {
+  return <section className="baseline-review" aria-label="待确认需求基线">
+    <div className="baseline-review-heading"><b>需求基线明细</b><span>{review.requirements.length} 项需求</span></div>
+    <div className="baseline-requirements">{review.requirements.map((requirement) => <article className="baseline-requirement" key={requirement.id}>
+      <div><span className={requirement.kind === 'functional' ? 'functional' : 'non-functional'}>{requirement.kind === 'functional' ? 'FR' : 'NFR'}</span><b>{requirement.id} · {requirement.title}</b></div>
+      <p>{requirement.description}</p>
+      <small>验收标准</small>
+      <ol>{requirement.acceptance_criteria.map((criterion, index) => <li key={`${requirement.id}-${index}`}>{criterion}</li>)}</ol>
+    </article>)}</div>
+    <div className="baseline-assumptions"><b>默认决策与假设</b>{review.assumptions.length ? <ul>{review.assumptions.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>本次需求基线未记录额外默认决策。</p>}</div>
+  </section>;
 }
 
 function EngineeringPanel({ engineering }: { engineering: EngineeringState }) {
