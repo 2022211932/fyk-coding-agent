@@ -90,10 +90,11 @@ class CodingAgent:
     ) -> RunResult:
         if not isinstance(task, str) or not task.strip():
             raise ValueError("Task must be a non-empty string")
-        self.plan.reset()
         plan_completion_reminders = 0
-        self.notify("plan_reset", {"step": 0})
-        if self.engineering is not None:
+        if self.engineering is None:
+            self.plan.reset()
+            self.notify("plan_reset", {"step": 0})
+        else:
             self.notify("engineering_state", {"engineering": self.engineering.payload()})
         if history is None:
             messages: list[dict[str, Any]] = [
@@ -179,6 +180,7 @@ class CodingAgent:
                 )
 
             awaiting_user = False
+            engineering_completed = False
             for call_index, call in enumerate(reply.tool_calls):
                 if self.cancelled():
                     return self._cancelled_result(messages, step)
@@ -194,19 +196,44 @@ class CodingAgent:
                         "error_type": "invalid_tool_call",
                     }
                 elif name == "update_plan":
-                    result = self.plan.update(arguments)
-                    if result.get("ok"):
+                    if self.engineering is not None:
+                        result = {
+                            "ok": False,
+                            "error": "Yukai-SE uses the engineering lifecycle as its single plan; update_plan is disabled",
+                            "error_type": "engineering_plan_is_authoritative",
+                        }
+                    else:
+                        result = self.plan.update(arguments)
+                    if result.get("ok") and self.engineering is None:
                         plan_payload = self.plan.payload()
                         self.events.emit("plan_updated", step=step, plan=plan_payload)
                         self.notify("plan_updated", {"step": step, "plan": plan_payload})
                 elif name == "update_engineering_state" and self.engineering is not None:
                     result = self.engineering.update(arguments, self.plan.evidence)
+                    evidence_id = self.plan.register_evidence(
+                        name, arguments, result, step=step, evidence_id=call_id
+                    )
+                    self.engineering.record_evidence(
+                        self.plan.evidence[evidence_id], arguments, result
+                    )
+                    result = {**result, "evidence_id": evidence_id}
                     if result.get("ok"):
                         payload = self.engineering.payload()
                         self.events.emit("engineering_updated", step=step, engineering=payload)
                         self.notify("engineering_state", {"step": step, "engineering": payload})
+                        engineering_completed = (
+                            arguments.get("action") == "complete_project"
+                            and self.engineering.is_completed
+                        )
                 elif name == "request_user_input" and self.engineering is not None:
                     result = self.engineering.request_user_input(arguments)
+                    evidence_id = self.plan.register_evidence(
+                        name, arguments, result, step=step, evidence_id=call_id
+                    )
+                    self.engineering.record_evidence(
+                        self.plan.evidence[evidence_id], arguments, result
+                    )
+                    result = {**result, "evidence_id": evidence_id}
                     if result.get("ok"):
                         awaiting_user = True
                         payload = self.engineering.payload()
@@ -214,10 +241,28 @@ class CodingAgent:
                         self.notify("engineering_question", {"step": step, "question": result["question"]})
                         self.notify("engineering_state", {"step": step, "engineering": payload})
                 else:
-                    result = self.tools.execute(name, arguments)
+                    if (
+                        self.engineering is not None
+                        and self.engineering.is_completed
+                        and name in {"write_file", "edit_file", "make_directory", "run_command"}
+                    ):
+                        result = {
+                            "ok": False,
+                            "error": (
+                                "The accepted project is read-only. Start a change request by moving the "
+                                "engineering lifecycle back to the affected phase before changing files or running commands."
+                            ),
+                            "error_type": "accepted_project_is_read_only",
+                        }
+                    else:
+                        result = self.tools.execute(name, arguments)
                     evidence_id = self.plan.register_evidence(
                         name, arguments, result, step=step, evidence_id=call_id
                     )
+                    if self.engineering is not None:
+                        self.engineering.record_evidence(
+                            self.plan.evidence[evidence_id], arguments, result
+                        )
                     result = {**result, "evidence_id": evidence_id}
                 messages.append(
                     {
@@ -238,22 +283,30 @@ class CodingAgent:
                 )
                 if self.cancelled():
                     return self._cancelled_result(messages, step)
+                if engineering_completed and self.engineering is not None:
+                    _append_skipped_tool_results(
+                        messages,
+                        reply.tool_calls[call_index + 1 :],
+                        "skipped_project_completed",
+                        "Skipped because project acceptance completed the engineering lifecycle",
+                    )
+                    final_text = self.engineering.completion_summary()
+                    self.events.emit("run_finished", reason="completed", steps=step)
+                    self.notify("finished", {"step": step, "reason": "completed"})
+                    return RunResult(
+                        final_text,
+                        step,
+                        "completed",
+                        messages,
+                        self.context.compactions,
+                    )
                 if awaiting_user:
-                    for remaining in reply.tool_calls[call_index + 1 :]:
-                        remaining_id, remaining_name, _, _ = _parse_tool_call(remaining)
-                        skipped = {
-                            "ok": False,
-                            "error": "Skipped because the workflow is awaiting user input",
-                            "error_type": "skipped_awaiting_user",
-                        }
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": remaining_id,
-                                "name": remaining_name,
-                                "content": json.dumps(skipped, ensure_ascii=False),
-                            }
-                        )
+                    _append_skipped_tool_results(
+                        messages,
+                        reply.tool_calls[call_index + 1 :],
+                        "skipped_awaiting_user",
+                        "Skipped because the workflow is awaiting user input",
+                    )
                     question = result["question"]
                     final_text = "需要你确认后才能继续：" + question["question"]
                     self.events.emit("run_finished", reason="awaiting_user", steps=step)
@@ -320,8 +373,9 @@ class CodingAgent:
             return outcome
 
     def _model_tools(self) -> list[dict[str, Any]]:
-        engineering_schemas = self.engineering.schemas if self.engineering is not None else []
-        return [*self.tools.schemas, self.plan.schema, *engineering_schemas]
+        if self.engineering is not None:
+            return [*self.tools.schemas, *self.engineering.schemas]
+        return [*self.tools.schemas, self.plan.schema]
 
     def _system_prompt(self) -> str:
         shell = os.environ.get("COMSPEC" if os.name == "nt" else "SHELL")
@@ -417,3 +471,24 @@ def _parse_tool_call(
     if not isinstance(arguments, dict):
         return call_id, name, {}, "Decoded tool arguments must be an object"
     return call_id, name, arguments, None
+
+
+def _append_skipped_tool_results(
+    messages: list[dict[str, Any]],
+    calls: list[dict[str, Any]],
+    error_type: str,
+    error: str,
+) -> None:
+    for call in calls:
+        call_id, name, _, _ = _parse_tool_call(call)
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": name,
+                "content": json.dumps(
+                    {"ok": False, "error": error, "error_type": error_type},
+                    ensure_ascii=False,
+                ),
+            }
+        )

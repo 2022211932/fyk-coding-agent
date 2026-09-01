@@ -213,6 +213,14 @@ kbd { font: 7px ui-monospace, monospace; border: 1px solid #2b3640; border-botto
 .engineering-question.resolved { opacity: .58; }
 .engineering-question button:disabled { cursor: default; }
 .question-resolved { display: block; margin-top: 9px; color: var(--mint); font-size: 8px; }
+.notice-row.engineering-decision { color: var(--blue); border-color: var(--blue); background: rgba(122,185,255,.06); }
+.engineering-review { display: grid !important; grid-template-columns: repeat(4, 1fr) !important; gap: 6px !important; margin: 0 0 12px; }
+.engineering-review > div { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 4px; border: 1px solid var(--line); border-radius: 7px; background: rgba(7,12,17,.45); }
+.engineering-review > div b { color: #d8e5e5; font: 12px ui-monospace, monospace; }
+.engineering-review > div small { color: var(--faint); font-size: 7px; }
+.engineering-review > div.warning b { color: var(--amber); }
+.engineering-review > p { grid-column: 1 / -1; margin: 2px 0 0 !important; padding: 8px 10px; border-left: 2px solid var(--amber); background: rgba(245,183,101,.045); color: #9d9382 !important; font-size: 8px !important; }
+.engineering-review > p b { display: block; margin-bottom: 3px; color: var(--amber); font-size: 7px; }
 .panel-empty { color: var(--faint); font-size: 8px; text-align: center; padding: 10px 0; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: rgba(3,6,9,.72); backdrop-filter: blur(8px); padding: 20px; }

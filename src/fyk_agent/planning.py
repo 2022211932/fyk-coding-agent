@@ -28,6 +28,7 @@ class Evidence:
     step: int
     verification: bool = False
     error_type: str = ""
+    changed: bool = True
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -38,6 +39,7 @@ class Evidence:
             "step": self.step,
             "verification": self.verification,
             "error_type": self.error_type,
+            "changed": self.changed,
         }
 
 
@@ -180,6 +182,7 @@ class PlanTracker:
             verification=tool == "run_command"
             and _is_verification_command(str(arguments.get("command", ""))),
             error_type=str(result.get("error_type", "")),
+            changed=not bool(result.get("unchanged") or result.get("already_existed")),
         )
         return evidence_id
 
@@ -321,6 +324,7 @@ class PlanTracker:
             if record.ok
             and (compatible_tools is None or record.tool in compatible_tools)
             and (kind != "verify" or record.verification)
+            and (kind != "change" or record.changed)
         ]
         if not compatible:
             expected = ", ".join(sorted(compatible_tools or {"a successful tool"}))

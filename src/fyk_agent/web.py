@@ -424,7 +424,7 @@ def run_web_console(
 
 def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "YukaiWeb/0.3"
+        server_version = "YukaiWeb/0.3.1"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return
@@ -634,7 +634,11 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                 state.update_session(session_id, title=_compact_title(message))
             state.append_session_event(
                 session_id,
-                {"type": "user", "message": message, "timestamp": time.strftime("%H:%M:%S")},
+                {
+                    "type": "engineering_decision" if engineering_answer is not None else "user",
+                    "message": message,
+                    "timestamp": time.strftime("%H:%M:%S"),
+                },
             )
 
             self.send_response(200)

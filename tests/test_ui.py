@@ -14,7 +14,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_banner_status_and_history_are_plain_text(self) -> None:
         self.ui.banner(
-            version="0.3.0",
+            version="0.3.1",
             model="deepseek-v4-pro",
             workspace=Path("workspace"),
             automatic_approval=False,
@@ -32,7 +32,7 @@ class TerminalUITests(unittest.TestCase):
         )
         self.ui.history(history)
         rendered = self.output.getvalue()
-        self.assertIn("Yukai 0.3.0", rendered)
+        self.assertIn("Yukai 0.3.1", rendered)
         self.assertIn("1 user turn(s), 3 message(s)", rendered)
         self.assertIn("inspect the project", rendered)
         self.assertNotIn("\033[", rendered)

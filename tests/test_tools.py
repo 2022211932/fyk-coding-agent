@@ -61,6 +61,26 @@ class ToolRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not belong"):
             self.registry.journal.unified_diff(edited["snapshot_id"], "other.py")
 
+    def test_identical_write_and_edit_do_not_create_fake_changes(self) -> None:
+        first = self.registry.execute(
+            "write_file", {"path": "same.txt", "content": "stable\n"}
+        )
+        repeated = self.registry.execute(
+            "write_file", {"path": "same.txt", "content": "stable\n"}
+        )
+        no_op_edit = self.registry.execute(
+            "edit_file",
+            {"path": "same.txt", "old_text": "stable", "new_text": "stable"},
+        )
+
+        self.assertTrue(first["ok"])
+        self.assertTrue(repeated["unchanged"])
+        self.assertNotIn("snapshot_id", repeated)
+        self.assertTrue(no_op_edit["unchanged"])
+        self.assertNotIn("snapshot_id", no_op_edit)
+        self.assertTrue(self.registry.undo_last()["ok"])
+        self.assertFalse((self.root / "same.txt").exists())
+
     def test_edit_requires_exact_match_count(self) -> None:
         (self.root / "data.txt").write_text("x x", encoding="utf-8")
         result = self.registry.execute(

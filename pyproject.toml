@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yukai"
-version = "0.3.0"
+version = "0.3.1"
 description = "Yukai - A Lightweight Autonomous Coding Agent"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -68,7 +69,9 @@ class EngineeringWorkflow:
             "description": (
                 "Update Yukai-SE's project-level engineering lifecycle. Requirements need IDs and "
                 "acceptance criteria; design modules map requirements; implementation and tests must "
-                "cite evidence IDs from successful tools. Use advance_phase only after its quality gate passes."
+                "cite evidence IDs from successful tools. Successful baseline approval, design definition, "
+                "complete implementation coverage, and complete verification coverage advance automatically. "
+                "Use advance_phase mainly to move backward for a change request."
             ),
             "parameters": {
                 "type": "object",
@@ -91,11 +94,19 @@ class EngineeringWorkflow:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "id": {"type": "string"},
+                                "id": {
+                                    "type": "string",
+                                    "pattern": "^(FR|NFR)-[0-9]{3}$",
+                                    "description": "Functional IDs use FR-001; non-functional IDs use NFR-001.",
+                                },
                                 "title": {"type": "string"},
                                 "kind": {"type": "string", "enum": ["functional", "non_functional"]},
                                 "description": {"type": "string"},
-                                "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+                                "acceptance_criteria": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {"type": "string", "minLength": 1},
+                                },
                             },
                             "required": ["id", "title", "kind", "description", "acceptance_criteria"],
                             "additionalProperties": False,
@@ -107,7 +118,11 @@ class EngineeringWorkflow:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "id": {"type": "string"},
+                                "id": {
+                                    "type": "string",
+                                    "pattern": "^MOD-[0-9]{3}$",
+                                    "description": "Module IDs use MOD-001, MOD-002, and so on.",
+                                },
                                 "name": {"type": "string"},
                                 "responsibility": {"type": "string"},
                                 "requirement_ids": {"type": "array", "items": {"type": "string"}},
@@ -123,10 +138,32 @@ class EngineeringWorkflow:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "requirement_id": {"type": "string"},
+                                "requirement_id": {"type": "string", "pattern": "^(FR|NFR)-[0-9]{3}$"},
                                 "path": {"type": "string"},
                                 "command": {"type": "string"},
                                 "evidence_id": {"type": "string"},
+                                "evidence_kind": {
+                                    "type": "string",
+                                    "enum": [
+                                        "unit_test",
+                                        "integration_test",
+                                        "performance_test",
+                                        "security_test",
+                                        "static_analysis",
+                                        "inspection",
+                                    ],
+                                    "description": "Required for link_tests. Functional requirements need unit_test or integration_test.",
+                                },
+                                "claim": {
+                                    "type": "string",
+                                    "description": "Required for link_tests: what this evidence actually proves.",
+                                },
+                                "criterion_indices": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {"type": "integer", "minimum": 1},
+                                    "description": "Required for link_tests: 1-based acceptance criteria covered by this evidence.",
+                                },
                             },
                             "required": ["requirement_id", "evidence_id"],
                             "additionalProperties": False,
@@ -192,9 +229,78 @@ class EngineeringWorkflow:
     def schemas(self) -> list[dict[str, Any]]:
         return [self.update_schema, self.question_schema]
 
+    @property
+    def is_completed(self) -> bool:
+        with self._lock:
+            return self._state["status"] == "completed"
+
+    def evidence_records(self) -> dict[str, Evidence]:
+        with self._lock:
+            records: dict[str, Evidence] = {}
+            for raw in self._state.get("evidence", []):
+                if not isinstance(raw, dict) or not raw.get("id"):
+                    continue
+                records[str(raw["id"])] = Evidence(
+                    evidence_id=str(raw["id"]),
+                    tool=str(raw.get("tool", "")),
+                    ok=bool(raw.get("ok")),
+                    summary=str(raw.get("summary", "")),
+                    step=int(raw.get("step", 0)),
+                    verification=bool(raw.get("verification")),
+                    error_type=str(raw.get("error_type", "")),
+                    changed=bool(raw.get("changed", True)),
+                )
+            return records
+
+    def record_evidence(
+        self,
+        evidence: Evidence,
+        arguments: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        with self._lock:
+            path = str(result.get("path") or arguments.get("path") or "")
+            record = {
+                **evidence.payload(),
+                "timestamp": _now(),
+                "path": path,
+                "command": str(arguments.get("command", ""))[:1000],
+                "exit_code": result.get("exit_code"),
+                "file_hash": self._file_hash(path) if path and evidence.ok else "",
+            }
+            existing = [
+                item for item in self._state.get("evidence", []) if item.get("id") != evidence.evidence_id
+            ]
+            self._state["evidence"] = (existing + [record])[-500:]
+            self._state["updated_at"] = _now()
+            self._persist(write_documents=False)
+
+    def completion_summary(self) -> str:
+        with self._lock:
+            requirements = self._state["requirements"]
+            functional = sum(item["kind"] == "functional" for item in requirements)
+            non_functional = len(requirements) - functional
+            commands = list(
+                dict.fromkeys(
+                    item.get("command", "") for item in self._state["test_links"] if item.get("command")
+                )
+            )
+            verification = "；".join(commands[:3]) or "已绑定的验证证据"
+            return (
+                "项目已完成并通过用户验收。\n\n"
+                f"- 需求基线：{functional} 项功能需求，{non_functional} 项非功能需求\n"
+                f"- 设计模块：{len(self._state['design_modules'])} 个\n"
+                f"- 实现追踪：{len(self._state['implementation_links'])} 条\n"
+                f"- 验证追踪：{len(self._state['test_links'])} 条（{verification}）\n\n"
+                "剩余风险：当前结论仅覆盖已确认需求及其验收标准；输入范围、运行环境或未声明约束发生变化时需要重新评估。"
+            )
+
     def payload(self) -> dict[str, Any]:
         with self._lock:
+            self._refresh_stale_verification()
             value = deepcopy(self._state)
+            value["evidence_count"] = len(value.get("evidence", []))
+            value.pop("evidence", None)
             value["skills"] = list(SKILLS)
             value["phases"] = [
                 {
@@ -210,6 +316,21 @@ class EngineeringWorkflow:
                 SKILLS[-1],
             )
             return value
+
+    def _refresh_stale_verification(self) -> None:
+        if (
+            PHASES.index(self._state["phase"]) > PHASES.index("verification")
+            and self._state["test_links"]
+            and not self._gate("verification")["passed"]
+        ):
+            self._state["phase"] = "verification"
+            self._state["status"] = "active"
+            self._invalidate_decisions("project_acceptance")
+            pending = self._state.get("pending_question")
+            if isinstance(pending, dict) and pending.get("decision_key") == "project_acceptance":
+                self._state["pending_question"] = None
+            self._state["updated_at"] = _now()
+            self._persist()
 
     def system_context(self) -> str:
         state = self.payload()
@@ -227,12 +348,16 @@ class EngineeringWorkflow:
         }
         return (
             "\n\nYukai-SE software-engineering mode is enabled.\n"
-            "Follow the lifecycle requirements -> design -> implementation -> verification -> acceptance. "
+            "This lifecycle is the only user-visible plan in engineering mode; do not call update_plan. "
+            "Follow requirements -> design -> implementation -> verification -> acceptance. "
             "Use update_engineering_state to maintain traceability. Before moving to design, ask the user "
             "to approve the requirements baseline with decision_key=requirements_baseline. Before completing, "
             "ask for project acceptance with decision_key=project_acceptance. Ask only about choices that "
             "materially change scope, architecture, constraints, or acceptance; inspect discoverable facts yourself. "
-            "A user question must be the last action of the turn.\n"
+            "A user question must be the last action of the turn. Phases advance automatically after their "
+            "gate passes, so inspect the returned engineering.phase before attempting advance_phase. For every "
+            "verification link, state the evidence_kind, the exact claim, and which 1-based acceptance criteria "
+            "it proves. Never claim zero residual risk; describe the boundary of the verified baseline.\n"
             "Current engineering state:\n"
             + json.dumps(compact, ensure_ascii=False, default=str)
         )
@@ -242,15 +367,17 @@ class EngineeringWorkflow:
     ) -> dict[str, Any]:
         with self._lock:
             try:
+                combined_evidence = self.evidence_records()
+                combined_evidence.update(evidence)
                 action = str(arguments.get("action", ""))
                 if action == "define_requirements":
                     self._define_requirements(arguments)
                 elif action == "define_design":
                     self._define_design(arguments)
                 elif action == "link_implementation":
-                    self._link_implementation(arguments, evidence)
+                    self._link_implementation(arguments, combined_evidence)
                 elif action == "link_tests":
-                    self._link_tests(arguments, evidence)
+                    self._link_tests(arguments, combined_evidence)
                 elif action == "advance_phase":
                     self._advance_phase(arguments)
                 elif action == "complete_project":
@@ -265,6 +392,7 @@ class EngineeringWorkflow:
                     "ok": False,
                     "error": str(exc),
                     "error_type": "engineering_gate_failed",
+                    "next_action": _next_action(str(exc), self._state["phase"]),
                     "engineering": self.payload(),
                 }
 
@@ -291,6 +419,23 @@ class EngineeringWorkflow:
                     )
                 if len({item["id"] for item in options}) != len(options):
                     raise EngineeringError("option IDs must be unique")
+                if decision_key in {"requirements_baseline", "project_acceptance"} and not any(
+                    item["id"].lower() in APPROVAL_OPTION_IDS for item in options
+                ):
+                    raise EngineeringError(
+                        f"{decision_key} options must include an approval ID such as approve"
+                    )
+                if decision_key == "requirements_baseline":
+                    if not self._state["requirements"] or any(
+                        not item.get("acceptance_criteria") for item in self._state["requirements"]
+                    ):
+                        raise EngineeringError(
+                            "define complete requirements and acceptance criteria before requesting baseline approval"
+                        )
+                if decision_key == "project_acceptance" and not self._gate("verification")["passed"]:
+                    raise EngineeringError(
+                        "verification quality gate must pass before requesting project acceptance"
+                    )
                 affected = arguments.get("affected_requirement_ids", [])
                 if not isinstance(affected, list):
                     raise EngineeringError("affected_requirement_ids must be an array")
@@ -307,6 +452,8 @@ class EngineeringWorkflow:
                     "affected_requirement_ids": [str(item) for item in affected],
                     "asked_at": _now(),
                 }
+                if decision_key == "project_acceptance":
+                    question_value["review_summary"] = self._review_summary()
                 self._state["pending_question"] = question_value
                 self._state["status"] = "awaiting_user"
                 self._state["updated_at"] = _now()
@@ -340,6 +487,10 @@ class EngineeringWorkflow:
             ] + [decision]
             self._state["pending_question"] = None
             self._state["status"] = "active"
+            if decision["key"] == "requirements_baseline" and _is_approved(decision):
+                gate = self._gate("requirements")
+                if gate["passed"]:
+                    self._state["phase"] = "design"
             self._state["updated_at"] = _now()
             self._persist()
             return {"ok": True, "decision": decision, "engineering": self.payload()}
@@ -431,6 +582,8 @@ class EngineeringWorkflow:
         self._state["implementation_links"] = []
         self._state["test_links"] = []
         self._invalidate_decisions("project_acceptance")
+        if self._gate("design")["passed"]:
+            self._state["phase"] = "implementation"
 
     def _link_implementation(
         self, arguments: dict[str, Any], evidence: Mapping[str, Evidence]
@@ -443,6 +596,8 @@ class EngineeringWorkflow:
             item for item in self._state["test_links"] if item["requirement_id"] not in affected
         ]
         self._invalidate_decisions("project_acceptance")
+        if self._gate("implementation")["passed"]:
+            self._state["phase"] = "verification"
 
     def _link_tests(
         self, arguments: dict[str, Any], evidence: Mapping[str, Evidence]
@@ -451,6 +606,8 @@ class EngineeringWorkflow:
             raise EngineeringError("move to the verification phase before linking test evidence")
         self._require_links(arguments, evidence, implementation=False)
         self._invalidate_decisions("project_acceptance")
+        if self._gate("verification")["passed"]:
+            self._state["phase"] = "acceptance"
 
     def _require_links(
         self,
@@ -463,6 +620,7 @@ class EngineeringWorkflow:
         if not isinstance(raw_links, list) or not raw_links:
             raise EngineeringError("links must contain at least one evidence link")
         known = {item["id"] for item in self._state["requirements"]}
+        requirement_by_id = {item["id"]: item for item in self._state["requirements"]}
         parsed = []
         for raw in raw_links:
             if not isinstance(raw, dict):
@@ -479,13 +637,97 @@ class EngineeringWorkflow:
             if implementation:
                 if record.tool not in {"write_file", "edit_file", "make_directory"}:
                     raise EngineeringError(f"implementation evidence {evidence_id} must be a successful change tool")
+                if not record.changed:
+                    raise EngineeringError(
+                        f"implementation evidence {evidence_id} did not change the workspace; reuse the original change evidence"
+                    )
                 path = _text(raw.get("path"), "implementation path", 500)
+                metadata = self._evidence_metadata(evidence_id)
+                if metadata:
+                    if metadata.get("path") and metadata.get("path") != path:
+                        raise EngineeringError(
+                            f"implementation evidence {evidence_id} belongs to {metadata.get('path')}, not {path}"
+                        )
+                    if metadata.get("file_hash") != self._file_hash(path):
+                        raise EngineeringError(
+                            f"implementation evidence {evidence_id} is stale because {path} changed afterward"
+                        )
                 parsed.append({"requirement_id": requirement_id, "path": path, "evidence_id": evidence_id})
             else:
-                if not record.verification:
-                    raise EngineeringError(f"test evidence {evidence_id} must be a successful verification command")
-                command = _text(raw.get("command"), "test command", 500)
-                parsed.append({"requirement_id": requirement_id, "command": command, "evidence_id": evidence_id})
+                evidence_kind = str(raw.get("evidence_kind", ""))
+                if evidence_kind not in {
+                    "unit_test",
+                    "integration_test",
+                    "performance_test",
+                    "security_test",
+                    "static_analysis",
+                    "inspection",
+                }:
+                    raise EngineeringError(
+                        f"verification link for {requirement_id} requires evidence_kind"
+                    )
+                requirement = requirement_by_id[requirement_id]
+                if requirement["kind"] == "functional" and evidence_kind not in {
+                    "unit_test",
+                    "integration_test",
+                }:
+                    raise EngineeringError(
+                        f"functional requirement {requirement_id} requires unit_test or integration_test evidence"
+                    )
+                if evidence_kind in {"unit_test", "integration_test"} and not record.verification:
+                    raise EngineeringError(
+                        f"{evidence_kind} evidence {evidence_id} must be a successful verification command"
+                    )
+                if evidence_kind in {"performance_test", "security_test"} and not record.verification:
+                    raise EngineeringError(
+                        f"{evidence_kind} evidence {evidence_id} must be a successful verification command"
+                    )
+                if evidence_kind == "static_analysis" and (
+                    record.tool != "run_command"
+                    or not re.search(
+                        r"\b(?:ruff|mypy|pylint|flake8|eslint|tsc|compileall|bandit|pip\s+check|npm\s+audit)\b",
+                        record.summary,
+                        flags=re.IGNORECASE,
+                    )
+                ):
+                    raise EngineeringError(
+                        f"static_analysis evidence {evidence_id} must come from a successful lint, type, compile, dependency, or security check"
+                    )
+                if evidence_kind == "inspection" and record.tool not in {
+                    "read_file",
+                    "search_text",
+                    "list_files",
+                    "get_environment",
+                }:
+                    raise EngineeringError(
+                        f"inspection evidence {evidence_id} must come from a successful inspection tool"
+                    )
+                claim = _text(raw.get("claim"), "verification claim", 500)
+                raw_indices = raw.get("criterion_indices")
+                if not isinstance(raw_indices, list) or not raw_indices or not all(
+                    isinstance(value, int) and not isinstance(value, bool) for value in raw_indices
+                ):
+                    raise EngineeringError(
+                        f"verification link for {requirement_id} requires 1-based criterion_indices"
+                    )
+                indices = sorted(set(raw_indices))
+                criterion_count = len(requirement["acceptance_criteria"])
+                if indices[0] < 1 or indices[-1] > criterion_count:
+                    raise EngineeringError(
+                        f"criterion_indices for {requirement_id} must be between 1 and {criterion_count}"
+                    )
+                command = str(raw.get("command") or record.summary).strip()[:500]
+                parsed.append(
+                    {
+                        "requirement_id": requirement_id,
+                        "command": command,
+                        "evidence_id": evidence_id,
+                        "evidence_kind": evidence_kind,
+                        "claim": claim,
+                        "criterion_indices": indices,
+                        "implementation_fingerprint": self._implementation_fingerprint(),
+                    }
+                )
         key = "implementation_links" if implementation else "test_links"
         existing = {
             (item["requirement_id"], item.get("path") or item.get("command")): item
@@ -494,6 +736,59 @@ class EngineeringWorkflow:
         for item in parsed:
             existing[(item["requirement_id"], item.get("path") or item.get("command"))] = item
         self._state[key] = list(existing.values())
+
+    def _implementation_fingerprint(self) -> str:
+        paths = sorted(
+            {
+                str(item.get("path", ""))
+                for item in self._state["implementation_links"]
+                if item.get("path")
+            }
+        )
+        digest = hashlib.sha256()
+        for path in paths:
+            digest.update(path.encode("utf-8"))
+            digest.update(self._file_hash(path).encode("ascii"))
+        return digest.hexdigest()
+
+    def _evidence_metadata(self, evidence_id: str) -> dict[str, Any] | None:
+        return next(
+            (
+                item
+                for item in reversed(self._state.get("evidence", []))
+                if item.get("id") == evidence_id
+            ),
+            None,
+        )
+
+    def _file_hash(self, path: str) -> str:
+        if not path:
+            return ""
+        try:
+            target = (self.workspace / path).resolve()
+            target.relative_to(self.workspace)
+            if not target.is_file():
+                return "missing"
+            return hashlib.sha256(target.read_bytes()).hexdigest()
+        except (OSError, ValueError):
+            return "unavailable"
+
+    def _review_summary(self) -> dict[str, Any]:
+        requirements = self._state["requirements"]
+        stale = sum(
+            item.get("implementation_fingerprint") != self._implementation_fingerprint()
+            for item in self._state["test_links"]
+        )
+        return {
+            "requirements": len(requirements),
+            "design_modules": len(self._state["design_modules"]),
+            "implementation_links": len(self._state["implementation_links"]),
+            "verification_links": len(self._state["test_links"]),
+            "stale_evidence": stale,
+            "residual_risk": (
+                "验收仅覆盖已确认的需求和验收标准；未声明的输入范围、环境差异和新变更不在本次证明范围内。"
+            ),
+        }
 
     def _advance_phase(self, arguments: dict[str, Any]) -> None:
         target = str(arguments.get("target_phase", ""))
@@ -578,10 +873,22 @@ class EngineeringWorkflow:
             if uncovered:
                 missing.append("实现证据覆盖需求：" + ", ".join(sorted(uncovered)))
         elif phase == "verification":
-            mapped = {item["requirement_id"] for item in self._state["test_links"]}
-            uncovered = known_ids - mapped
-            if uncovered:
-                missing.append("测试证据覆盖需求：" + ", ".join(sorted(uncovered)))
+            current_fingerprint = self._implementation_fingerprint()
+            for requirement in requirements:
+                links = [
+                    item
+                    for item in self._state["test_links"]
+                    if item["requirement_id"] == requirement["id"]
+                    and item.get("implementation_fingerprint") == current_fingerprint
+                ]
+                covered = {
+                    index for item in links for index in item.get("criterion_indices", [])
+                }
+                expected = set(range(1, len(requirement["acceptance_criteria"]) + 1))
+                uncovered = expected - covered
+                if uncovered:
+                    labels = ", ".join(str(index) for index in sorted(uncovered))
+                    missing.append(f"{requirement['id']} 缺少或已过期的验收标准证据：{labels}")
         elif phase == "acceptance":
             verification = self._gate("verification")
             missing.extend(verification["missing"])
@@ -602,12 +909,13 @@ class EngineeringWorkflow:
         except (OSError, json.JSONDecodeError):
             return _default_state()
 
-    def _persist(self) -> None:
+    def _persist(self, *, write_documents: bool = True) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps(self._state, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(self.path)
-        self._write_documents()
+        if write_documents:
+            self._write_documents()
 
     def _write_documents(self) -> None:
         requirements = ["# 软件需求规格说明", "", f"项目：{self._state['project_title'] or '未命名项目'}", ""]
@@ -647,7 +955,12 @@ class EngineeringWorkflow:
             req_id = requirement["id"]
             modules = [item["id"] for item in self._state["design_modules"] if req_id in item["requirement_ids"]]
             paths = [item["path"] for item in self._state["implementation_links"] if req_id == item["requirement_id"]]
-            commands = [item["command"] for item in self._state["test_links"] if req_id == item["requirement_id"]]
+            commands = [
+                f"{item.get('evidence_kind', 'verification')}: "
+                f"{item.get('claim') or '已验证'} ({item.get('command', '')})"
+                for item in self._state["test_links"]
+                if req_id == item["requirement_id"]
+            ]
             traceability.append(
                 f"| {req_id} | {', '.join(modules) or '-'} | {', '.join(paths) or '-'} | {', '.join(commands) or '-'} |"
             )
@@ -671,6 +984,7 @@ def _default_state() -> dict[str, Any]:
         "implementation_links": [],
         "test_links": [],
         "decisions": [],
+        "evidence": [],
         "pending_question": None,
         "updated_at": _now(),
     }
@@ -697,3 +1011,17 @@ def _now() -> str:
 
 def _is_approved(decision: dict[str, Any] | None) -> bool:
     return bool(decision and str(decision.get("option_id", "")).lower() in APPROVAL_OPTION_IDS)
+
+
+def _next_action(error: str, phase: str) -> str:
+    if "FR-001 or NFR-001" in error:
+        return "Retry define_requirements with IDs like FR-001 and NFR-001 matching requirement kind."
+    if "MOD-001" in error:
+        return "Retry define_design with module IDs like MOD-001 and MOD-002."
+    if "criterion_indices" in error:
+        return "Retry link_tests with evidence_kind, claim, and 1-based criterion_indices for each requirement."
+    if "move to the" in error:
+        return f"Inspect engineering.phase (currently {phase}); phases normally advance automatically after a complete gate."
+    if "quality gate failed" in error:
+        return "Satisfy every item in engineering.phases[].gate.missing before continuing."
+    return "Inspect the returned engineering state and correct only the rejected action."

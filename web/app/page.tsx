@@ -33,7 +33,8 @@ type PlanEvidence = { id: string; tool: string; ok: boolean; summary: string; st
 type PlanStep = { id: string; title: string; kind: 'inspect' | 'change' | 'verify' | 'other'; status: 'pending' | 'in_progress' | 'completed' | 'blocked'; evidence_ids: string[]; note: string; blocker_type?: 'tool_failure' | 'missing_prerequisite' | 'environment' | 'user_input_required' };
 type TaskPlan = { summary: string; steps: PlanStep[]; completed: number; total: number; terminal: boolean; blocked: boolean; evidence: PlanEvidence[] };
 type EngineeringOption = { id: string; label: string; description?: string };
-type EngineeringQuestion = { question_id: string; decision_key: string; question: string; reason: string; options: EngineeringOption[] };
+type EngineeringReview = { requirements: number; design_modules: number; implementation_links: number; verification_links: number; stale_evidence: number; residual_risk: string };
+type EngineeringQuestion = { question_id: string; decision_key: string; question: string; reason: string; options: EngineeringOption[]; review_summary?: EngineeringReview };
 type EngineeringPhase = { id: string; title: string; status: 'pending' | 'active' | 'awaiting_user' | 'completed'; gate: { passed: boolean; missing: string[] } };
 type EngineeringState = {
   phase: string;
@@ -117,7 +118,7 @@ export default function Home() {
   const sessionId = activeSession.id;
   const toolCalls = events.filter((event) => event.type === 'tool_call').length;
   const latestStep = events.reduce((max, event) => Math.max(max, event.step || event.steps || 0), 0);
-  const fileChanges = events.filter((event) => event.type === 'tool_result' && ['edit_file', 'write_file'].includes(event.tool || '') && event.result?.ok);
+  const fileChanges = events.filter((event) => event.type === 'tool_result' && ['edit_file', 'write_file'].includes(event.tool || '') && event.result?.ok && !event.result?.unchanged);
   const currentTitle = live ? activeSession.title : '修复 slugify 测试';
   const orderedSessions = [...conversationStore.items].sort((left, right) => Number(right.pinned) - Number(left.pinned) || right.updatedAt - left.updatedAt);
   const recentSessions = orderedSessions.filter((session) => !session.archived);
@@ -468,7 +469,7 @@ export default function Home() {
     updateSession(runSessionId, (session) => ({
       ...session,
       title: session.events.some((item) => item.type === 'user') ? session.title : compact(message, 34),
-      events: [...session.events, { type: 'user', message, timestamp: now() }],
+      events: [...session.events, { type: engineeringAnswer ? 'engineering_decision' : 'user', message, timestamp: now() }],
       updatedAt: Date.now(),
     }));
     const { api, token } = connection.current;
@@ -607,7 +608,7 @@ export default function Home() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>Yukai</span><span className="version">v{status?.version || '0.3'}</span></div>
+        <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>Yukai</span><span className="version">v{status?.version || '0.3.1'}</span></div>
         <button className="workspace-pill" type="button" onClick={openProjectPicker} disabled={!live || running} title="选择本地主机上的项目"><span className={`status-dot ${connectionError ? 'offline' : ''}`} /><span className="workspace-path">{live ? compact(status.workspace, 52) : 'Demo · demo-workspace'}</span><span className="workspace-chevron">⌄</span></button>
         <div className="top-actions"><button className="icon-button" aria-label="撤销最近修改" onClick={undo}>↶</button><div className="model-chip"><span>◆</span> {status?.model || 'DeepSeek V4 Pro'}</div></div>
       </header>
@@ -651,7 +652,7 @@ export default function Home() {
 
         <aside className="inspector">
           {live && activeSession.engineeringMode && activeEngineering && <EngineeringPanel engineering={activeEngineering} />}
-          {live && activePlan && <PlanPanel plan={activePlan} />}
+          {live && !activeSession.engineeringMode && activePlan && <PlanPanel plan={activePlan} />}
           <section className="inspector-section context-section">
             <div className="panel-heading"><span>会话上下文</span><b>{live ? `${contextPercent.toFixed(contextPercent < 1 ? 1 : 0)}%` : '24%'}</b></div><div className="meter"><i style={{ width: `${live ? contextPercent : 24}%` }} /></div><div className="meter-label"><span>{live ? `${activeSession.messageCount} 条消息` : '12 条消息'}</span><span>{live ? `${formatChars(activeSession.contextChars)} / ${formatChars(status?.max_context_chars || 0)}` : '192k / 800k chars'}</span></div>
             {live && activeSession.contextCompactions > 0 && <div className="context-note">已自动压缩 {activeSession.contextCompactions} 次上下文</div>}
@@ -709,6 +710,7 @@ function LiveTimeline({ events, running, onAnswerQuestion }: { events: AgentEven
   return <>{events.map((event, index) => {
     if (event.type === 'run_started') return null;
     if (event.type === 'user') return <article className="user-turn" key={index}><div className="avatar user-avatar">FY</div><div className="turn-body"><div className="turn-meta"><b>你</b><time>{event.timestamp}</time></div><p>{event.message}</p></div></article>;
+    if (event.type === 'engineering_decision') return <div className="notice-row engineering-decision" key={index}>✓ 你已提交工程决策：{event.message}</div>;
     if (event.type === 'model_request') return <div className="live-activity thinking-row" key={index}><span className="pulse" /><div><b>DeepSeek 正在思考</b><small>模型步骤 {event.step}</small></div></div>;
     if (event.type === 'tool_call') return <div className="live-activity" key={index}><span className="activity-icon">{toolIcon(event.tool)}</span><div><b>{toolLabel(event)}</b><small>{toolDetail(event)}</small></div><span className="running-dot" /></div>;
     if (event.type === 'tool_result') return <ToolResult event={event} key={index} />;
@@ -723,7 +725,7 @@ function LiveTimeline({ events, running, onAnswerQuestion }: { events: AgentEven
     if (event.type === 'engineering_state') return null;
     if (event.type === 'engineering_question' && event.question) {
       const active = currentQuestionId === event.question.question_id;
-      return <article className={`engineering-question ${active ? 'active' : 'resolved'}`} key={index}><p className="eyebrow">ENGINEERING DECISION</p><h3>{event.question.question}</h3><p>{event.question.reason}</p><div>{event.question.options.map((option) => <button type="button" key={option.id} disabled={!active || running} onClick={() => onAnswerQuestion(event.question as EngineeringQuestion, option)}><b>{option.label}</b>{option.description && <small>{option.description}</small>}</button>)}</div>{!active && <small className="question-resolved">该决策已记录</small>}</article>;
+      return <article className={`engineering-question ${active ? 'active' : 'resolved'}`} key={index}><p className="eyebrow">ENGINEERING DECISION</p><h3>{event.question.question}</h3><p>{event.question.reason}</p>{event.question.review_summary && <EngineeringReviewSummary review={event.question.review_summary} />}<div>{event.question.options.map((option) => <button type="button" key={option.id} disabled={!active || running} onClick={() => onAnswerQuestion(event.question as EngineeringQuestion, option)}><b>{option.label}</b>{option.description && <small>{option.description}</small>}</button>)}</div>{!active && <small className="question-resolved">该决策已记录</small>}</article>;
     }
     if (event.type === 'final') {
       const finalState = finalStatus(event.stop_reason);
@@ -740,7 +742,9 @@ function ToolResult({ event }: { event: AgentEvent }) {
   const ok = Boolean(result.ok);
   const output = String(result.stdout || result.stderr || '');
   const plan = result.plan as TaskPlan | undefined;
-  const detail = plan
+  const detail = result.unchanged
+    ? '内容没有变化，已跳过写入'
+    : plan
     ? `${plan.completed}/${plan.total} 个步骤已完成`
     : result.duration_ms
     ? `${Math.round(Number(result.duration_ms))}ms`
@@ -750,6 +754,10 @@ function ToolResult({ event }: { event: AgentEvent }) {
         ? `exit ${result.exit_code}`
         : '';
   return <div className={`tool-result-row ${ok ? 'ok' : 'failed'}`}><span>{ok ? '✓' : '×'}</span><div><b>{ok ? '执行成功' : '执行失败'} · {event.tool}</b><small>{detail}</small>{output && <pre>{compact(output, 1600)}</pre>}</div></div>;
+}
+
+function EngineeringReviewSummary({ review }: { review: EngineeringReview }) {
+  return <div className="engineering-review"><div><b>{review.requirements}</b><small>需求</small></div><div><b>{review.design_modules}</b><small>模块</small></div><div><b>{review.verification_links}</b><small>验证证据</small></div><div className={review.stale_evidence ? 'warning' : ''}><b>{review.stale_evidence}</b><small>过期证据</small></div><p><b>剩余风险</b>{review.residual_risk}</p></div>;
 }
 
 function EngineeringPanel({ engineering }: { engineering: EngineeringState }) {
@@ -782,7 +790,7 @@ function PlanPanel({ plan }: { plan: TaskPlan }) {
 }
 
 function ChangeSummary({ events, loading, onOpen }: { events: AgentEvent[]; loading: string; onOpen: (event: AgentEvent) => void }) {
-  const changes = events.filter((event) => ['write_file', 'edit_file'].includes(event.tool || '') && event.type === 'tool_result' && event.result?.ok && event.result?.snapshot_id);
+  const changes = events.filter((event) => ['write_file', 'edit_file'].includes(event.tool || '') && event.type === 'tool_result' && event.result?.ok && !event.result?.unchanged && event.result?.snapshot_id);
   if (!changes.length) return <p className="panel-empty">暂无文件修改</p>;
   return <>{changes.slice(-4).map((event, index) => {
     const path = String(event.result?.path || 'file');

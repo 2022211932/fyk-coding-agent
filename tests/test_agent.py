@@ -7,6 +7,7 @@ import unittest
 from fyk_agent.agent import CodingAgent
 from fyk_agent.client import AssistantReply
 from fyk_agent.engineering import EngineeringWorkflow
+from fyk_agent.planning import Evidence
 from fyk_agent.tools import ToolRegistry
 from fyk_agent.workspace import Workspace
 
@@ -15,9 +16,11 @@ class FakeClient:
     def __init__(self, replies: list[AssistantReply]):
         self.replies = replies
         self.requests: list[list[dict]] = []
+        self.toolsets: list[list[dict]] = []
 
     def complete(self, messages: list[dict], tools: list[dict]) -> AssistantReply:
         self.requests.append([dict(message) for message in messages])
+        self.toolsets.append(list(tools))
         if not self.replies:
             raise AssertionError("Fake client received more calls than expected")
         return self.replies.pop(0)
@@ -49,6 +52,20 @@ def named_tool_reply(name: str, arguments: dict, call_id: str) -> AssistantReply
         "function": {"name": name, "arguments": arguments},
     }
     return AssistantReply("", [call], {"role": "assistant", "content": None, "tool_calls": [call]})
+
+
+def multiple_tool_reply(calls: list[tuple[str, dict, str]]) -> AssistantReply:
+    tool_calls = [
+        {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": arguments},
+        }
+        for name, arguments, call_id in calls
+    ]
+    return AssistantReply(
+        "", tool_calls, {"role": "assistant", "content": None, "tool_calls": tool_calls}
+    )
 
 
 class AgentLoopTests(unittest.TestCase):
@@ -264,6 +281,99 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(result.messages[-1]["role"], "tool")
         self.assertEqual(workflow.payload()["pending_question"]["question_id"], "scope-1")
         self.assertTrue(any(kind == "engineering_question" for kind, _ in events))
+        tool_names = {item["function"]["name"] for item in client.toolsets[0]}
+        self.assertNotIn("update_plan", tool_names)
+        self.assertIn("update_engineering_state", tool_names)
+
+    def test_acceptance_completion_stops_remaining_file_writes(self) -> None:
+        workflow = EngineeringWorkflow(self.registry.workspace.root)
+        requirement = {
+            "id": "FR-001",
+            "title": "问候",
+            "kind": "functional",
+            "description": "返回问候文本。",
+            "acceptance_criteria": ["调用 greet 返回 hello"],
+        }
+        workflow.update({"action": "define_requirements", "requirements": [requirement]}, {})
+        baseline = {
+            "question_id": "baseline-complete",
+            "decision_key": "requirements_baseline",
+            "question": "确认需求？",
+            "reason": "进入设计。",
+            "options": [{"id": "approve", "label": "确认"}, {"id": "revise", "label": "修改"}],
+        }
+        workflow.request_user_input(baseline)
+        workflow.answer_question("baseline-complete", option_id="approve")
+        workflow.update(
+            {
+                "action": "define_design",
+                "modules": [
+                    {
+                        "id": "MOD-001",
+                        "name": "问候模块",
+                        "responsibility": "返回问候。",
+                        "requirement_ids": ["FR-001"],
+                        "interfaces": ["greet()"],
+                    }
+                ],
+            },
+            {},
+        )
+        (self.registry.workspace.root / "main.py").write_text(
+            "def greet(): return 'hello'\n", encoding="utf-8"
+        )
+        change = Evidence("change-ready", "write_file", True, "main.py", 1)
+        workflow.update(
+            {
+                "action": "link_implementation",
+                "links": [{"requirement_id": "FR-001", "path": "main.py", "evidence_id": "change-ready"}],
+            },
+            {"change-ready": change},
+        )
+        test = Evidence("test-ready", "run_command", True, "unittest · exit 0", 2, verification=True)
+        workflow.update(
+            {
+                "action": "link_tests",
+                "links": [
+                    {
+                        "requirement_id": "FR-001",
+                        "command": "python -m unittest",
+                        "evidence_id": "test-ready",
+                        "evidence_kind": "unit_test",
+                        "claim": "greet 返回 hello",
+                        "criterion_indices": [1],
+                    }
+                ],
+            },
+            {"test-ready": test},
+        )
+        workflow.request_user_input(
+            {
+                "question_id": "accept-complete",
+                "decision_key": "project_acceptance",
+                "question": "是否验收？",
+                "reason": "质量门已满足。",
+                "options": [{"id": "approve", "label": "验收"}, {"id": "revise", "label": "修改"}],
+            }
+        )
+        workflow.answer_question("accept-complete", option_id="approve")
+
+        client = FakeClient(
+            [
+                multiple_tool_reply(
+                    [
+                        ("update_engineering_state", {"action": "complete_project"}, "complete-1"),
+                        ("write_file", {"path": "late.py", "content": "bad = True\n"}, "late-1"),
+                    ]
+                )
+            ]
+        )
+        result = CodingAgent(client, self.registry, engineering=workflow).run("继续验收")
+
+        self.assertEqual(result.stop_reason, "completed")
+        self.assertFalse((self.registry.workspace.root / "late.py").exists())
+        self.assertIn("剩余风险", result.final_text)
+        self.assertIn("skipped_project_completed", result.messages[-1]["content"])
 
 
 if __name__ == "__main__":

@@ -198,7 +198,7 @@ class ToolRegistry:
             ),
             ToolSpec(
                 "write_file",
-                "Create or replace one UTF-8 text file. Parent directories are created automatically.",
+                "Create or replace one UTF-8 text file. Parent directories are created automatically. Identical content is reported as unchanged and is not written again.",
                 _object_schema(
                     {"path": {"type": "string"}, "content": {"type": "string"}},
                     required=["path", "content"],
@@ -208,7 +208,7 @@ class ToolRegistry:
             ),
             ToolSpec(
                 "edit_file",
-                "Replace an exact text fragment in a UTF-8 file. Fails unless the match count equals expected_replacements.",
+                "Replace an exact text fragment in a UTF-8 file. Fails unless the match count equals expected_replacements; a no-op replacement is reported as unchanged.",
                 _object_schema(
                     {
                         "path": {"type": "string"},
@@ -432,6 +432,18 @@ class ToolRegistry:
         target = self.workspace.resolve(path, for_write=True)
         if target.exists() and not target.is_file():
             raise ToolError(f"Cannot overwrite a directory: {path}")
+        if target.is_file():
+            try:
+                if target.read_text(encoding="utf-8") == content:
+                    return {
+                        "ok": True,
+                        "path": self.workspace.relative(target),
+                        "bytes_written": 0,
+                        "unchanged": True,
+                        "message": "File already has the requested content; no write was performed",
+                    }
+            except UnicodeDecodeError:
+                raise ToolError(f"Cannot overwrite non-UTF-8 text file: {path}")
         target.parent.mkdir(parents=True, exist_ok=True)
         snapshot_id = self.journal.capture(target)
         _atomic_write_text(target, content)
@@ -461,6 +473,14 @@ class ToolRegistry:
             raise ToolError(
                 f"Expected {expected_replacements} exact match(es), found {actual}; file was not changed"
             )
+        if old_text == new_text:
+            return {
+                "ok": True,
+                "path": self.workspace.relative(target),
+                "replacements": 0,
+                "unchanged": True,
+                "message": "Replacement would not change the file; no write was performed",
+            }
         snapshot_id = self.journal.capture(target)
         updated = text.replace(old_text, new_text, expected_replacements)
         _atomic_write_text(target, updated)

@@ -143,8 +143,22 @@ class EngineeringWorkflowTests(unittest.TestCase):
             {
                 "action": "link_tests",
                 "links": [
-                    {"requirement_id": "FR-001", "command": "pytest", "evidence_id": "cmd-1"},
-                    {"requirement_id": "NFR-001", "command": "pytest", "evidence_id": "cmd-1"},
+                    {
+                        "requirement_id": "FR-001",
+                        "command": "pytest",
+                        "evidence_id": "cmd-1",
+                        "evidence_kind": "unit_test",
+                        "claim": "登录成功和错误凭据均由测试断言覆盖",
+                        "criterion_indices": [1, 2],
+                    },
+                    {
+                        "requirement_id": "NFR-001",
+                        "command": "pytest",
+                        "evidence_id": "cmd-1",
+                        "evidence_kind": "performance_test",
+                        "claim": "验证命令检查响应约束",
+                        "criterion_indices": [1],
+                    },
                 ],
             },
             {"cmd-1": command},
@@ -158,6 +172,102 @@ class EngineeringWorkflowTests(unittest.TestCase):
     def test_stale_question_answer_is_rejected(self) -> None:
         with self.assertRaises(EngineeringError):
             self.workflow.answer_question("missing", option_id="approve")
+
+    def test_persistent_evidence_auto_advances_and_invalidates_stale_tests(self) -> None:
+        self.workflow.update({"action": "define_requirements", "requirements": REQUIREMENTS}, {})
+        self.workflow.request_user_input(
+            {
+                "question_id": "baseline-auto",
+                "decision_key": "requirements_baseline",
+                "question": "确认需求基线？",
+                "reason": "进入设计阶段。",
+                "options": [{"id": "approve", "label": "确认"}, {"id": "revise", "label": "修改"}],
+            }
+        )
+        self.workflow.answer_question("baseline-auto", option_id="approve")
+        self.assertEqual(self.workflow.payload()["phase"], "design")
+        self.workflow.update(
+            {
+                "action": "define_design",
+                "modules": [
+                    {
+                        "id": "MOD-001",
+                        "name": "认证模块",
+                        "responsibility": "覆盖登录及其响应约束。",
+                        "requirement_ids": ["FR-001", "NFR-001"],
+                        "interfaces": ["login(credentials)"],
+                    }
+                ],
+            },
+            {},
+        )
+        self.assertEqual(self.workflow.payload()["phase"], "implementation")
+
+        (self.root / "main.py").write_text("def login(): return True\n", encoding="utf-8")
+        change = Evidence("change-persisted", "write_file", True, "main.py", 1)
+        self.workflow.record_evidence(
+            change, {"path": "main.py"}, {"ok": True, "path": "main.py"}
+        )
+        restored = EngineeringWorkflow(self.root)
+        linked = restored.update(
+            {
+                "action": "link_implementation",
+                "links": [
+                    {"requirement_id": "FR-001", "path": "main.py", "evidence_id": "change-persisted"},
+                    {"requirement_id": "NFR-001", "path": "main.py", "evidence_id": "change-persisted"},
+                ],
+            },
+            {},
+        )
+        self.assertTrue(linked["ok"])
+        self.assertEqual(restored.payload()["phase"], "verification")
+
+        command = Evidence("test-persisted", "run_command", True, "pytest · exit 0", 2, verification=True)
+        restored.record_evidence(
+            command, {"command": "pytest"}, {"ok": True, "exit_code": 0}
+        )
+        verified = EngineeringWorkflow(self.root).update(
+            {
+                "action": "link_tests",
+                "links": [
+                    {
+                        "requirement_id": "FR-001",
+                        "command": "pytest",
+                        "evidence_id": "test-persisted",
+                        "evidence_kind": "unit_test",
+                        "claim": "覆盖正确和错误凭据",
+                        "criterion_indices": [1, 2],
+                    },
+                    {
+                        "requirement_id": "NFR-001",
+                        "command": "pytest",
+                        "evidence_id": "test-persisted",
+                        "evidence_kind": "performance_test",
+                        "claim": "检查响应时间约束",
+                        "criterion_indices": [1],
+                    },
+                ],
+            },
+            {},
+        )
+        self.assertTrue(verified["ok"])
+        self.assertEqual(verified["engineering"]["phase"], "acceptance")
+
+        question = EngineeringWorkflow(self.root).request_user_input(
+            {
+                "question_id": "accept-review",
+                "decision_key": "project_acceptance",
+                "question": "是否验收？",
+                "reason": "全部质量门已满足。",
+                "options": [{"id": "approve", "label": "验收"}, {"id": "revise", "label": "修改"}],
+            }
+        )
+        self.assertEqual(question["question"]["review_summary"]["stale_evidence"], 0)
+
+        (self.root / "main.py").write_text("def login(): return False\n", encoding="utf-8")
+        stale = EngineeringWorkflow(self.root).payload()
+        self.assertEqual(stale["phase"], "verification")
+        self.assertFalse(next(item for item in stale["phases"] if item["id"] == "verification")["gate"]["passed"])
 
 
 if __name__ == "__main__":
