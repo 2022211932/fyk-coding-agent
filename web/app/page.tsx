@@ -25,11 +25,28 @@ type AgentEvent = {
   max_context_chars?: number;
   plan?: TaskPlan;
   unfinished?: string[];
+  engineering?: EngineeringState;
+  question?: EngineeringQuestion;
 };
 
 type PlanEvidence = { id: string; tool: string; ok: boolean; summary: string; step: number; verification: boolean; error_type?: string };
 type PlanStep = { id: string; title: string; kind: 'inspect' | 'change' | 'verify' | 'other'; status: 'pending' | 'in_progress' | 'completed' | 'blocked'; evidence_ids: string[]; note: string; blocker_type?: 'tool_failure' | 'missing_prerequisite' | 'environment' | 'user_input_required' };
 type TaskPlan = { summary: string; steps: PlanStep[]; completed: number; total: number; terminal: boolean; blocked: boolean; evidence: PlanEvidence[] };
+type EngineeringOption = { id: string; label: string; description?: string };
+type EngineeringQuestion = { question_id: string; decision_key: string; question: string; reason: string; options: EngineeringOption[] };
+type EngineeringPhase = { id: string; title: string; status: 'pending' | 'active' | 'awaiting_user' | 'completed'; gate: { passed: boolean; missing: string[] } };
+type EngineeringState = {
+  phase: string;
+  status: string;
+  project_title: string;
+  requirements: Array<{ id: string; title: string }>;
+  design_modules: Array<{ id: string; name: string }>;
+  implementation_links: Array<{ requirement_id: string; path: string }>;
+  test_links: Array<{ requirement_id: string; command: string }>;
+  pending_question?: EngineeringQuestion | null;
+  phases: EngineeringPhase[];
+  active_skill?: { id: string; title: string; description: string };
+};
 
 type Status = {
   version: string;
@@ -37,6 +54,7 @@ type Status = {
   workspace: string;
   automatic_approval: boolean;
   max_context_chars: number;
+  engineering: EngineeringState;
 };
 
 type FileEntry = { path: string; type: string; size?: number };
@@ -57,6 +75,7 @@ type ConversationSession = {
   contextChars: number;
   messageCount: number;
   contextCompactions: number;
+  engineeringMode: boolean;
 };
 type ConversationStore = { items: ConversationSession[]; activeId: string };
 type DiffView = { path: string; diff: string; truncated: boolean };
@@ -106,6 +125,8 @@ export default function Home() {
   const contextPercent = status ? Math.min(100, (activeSession.contextChars / status.max_context_chars) * 100) : 24;
   const latestPlanEvent = [...events].reverse().find((event) => ['plan_updated', 'plan_reset'].includes(event.type));
   const activePlan = latestPlanEvent?.type === 'plan_updated' ? latestPlanEvent.plan : undefined;
+  const latestEngineeringEvent = [...events].reverse().find((event) => event.type === 'engineering_state' && event.engineering);
+  const activeEngineering = latestEngineeringEvent?.engineering || status?.engineering;
 
   function updateSession(targetId: string, update: (session: ConversationSession) => ConversationSession) {
     setConversationStore((previous) => ({
@@ -125,10 +146,12 @@ export default function Home() {
     }));
   }
 
-  const persistSession = useCallback(async (session: ConversationSession, fields?: Partial<Pick<ConversationSession, 'title' | 'pinned' | 'archived'>>) => {
+  const persistSession = useCallback(async (session: ConversationSession, fields?: Partial<Pick<ConversationSession, 'title' | 'pinned' | 'archived' | 'engineeringMode'>>) => {
     const { api, token } = connection.current;
     if (!api) return;
-    const payload = { session_id: session.id, ...(fields || {}) };
+    const normalized = fields ? { ...fields, engineering_mode: fields.engineeringMode } : {};
+    delete (normalized as Record<string, unknown>).engineeringMode;
+    const payload = { session_id: session.id, ...normalized };
     const response = await fetch(`${api}/api/sessions/update`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
@@ -151,6 +174,7 @@ export default function Home() {
       contextChars: Number(item.context_chars || 0),
       messageCount: Number(item.message_count || 0),
       contextCompactions: Number(item.context_compactions || 0),
+      engineeringMode: Boolean(item.engineering_mode),
     }));
     if (restored.length) {
       const active = restored.find((item) => !item.archived) || restored[0];
@@ -359,6 +383,18 @@ export default function Home() {
     }
   }
 
+  async function toggleEngineeringMode() {
+    if (!live || running) return;
+    const enabled = !activeSession.engineeringMode;
+    updateSession(sessionId, (session) => ({ ...session, engineeringMode: enabled }));
+    try {
+      await persistSession(activeSession, { engineeringMode: enabled });
+    } catch (error) {
+      updateSession(sessionId, (session) => ({ ...session, engineeringMode: !enabled }));
+      setConnectionError(error instanceof Error ? error.message : '无法切换软件工程模式');
+    }
+  }
+
   async function browseDirectory(path?: string) {
     const { api, token } = connection.current;
     const query = path ? `?path=${encodeURIComponent(path)}` : '';
@@ -418,9 +454,7 @@ export default function Home() {
     }
   }
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    const message = prompt.trim();
+  async function runMessage(message: string, engineeringAnswer?: { question_id: string; option_id: string; answer?: string }) {
     if (!message || running) return;
     if (!live) {
       setPrompt('');
@@ -442,7 +476,7 @@ export default function Home() {
       const response = await fetch(`${api}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Yukai-Token': token },
-        body: JSON.stringify({ message, session_id: runSessionId }),
+        body: JSON.stringify({ message, session_id: runSessionId, engineering_mode: activeSession.engineeringMode, engineering_answer: engineeringAnswer }),
       });
       if (!response.ok || !response.body) {
         const body = await response.text();
@@ -474,6 +508,20 @@ export default function Home() {
       setStopping(false);
       setApproval(null);
     }
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    const message = prompt.trim();
+    if (!message || running) return;
+    setPrompt('');
+    await runMessage(message);
+  }
+
+  async function answerEngineeringQuestion(question: EngineeringQuestion, option: EngineeringOption) {
+    if (running) return;
+    const message = `关于“${question.question}”，我的选择是“${option.label}”。请记录该决策并继续软件工程流程。`;
+    await runMessage(message, { question_id: question.question_id, option_id: option.id, answer: option.label });
   }
 
   async function stopTask() {
@@ -559,7 +607,7 @@ export default function Home() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>Yukai</span><span className="version">v{status?.version || '0.2'}</span></div>
+        <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>Yukai</span><span className="version">v{status?.version || '0.3'}</span></div>
         <button className="workspace-pill" type="button" onClick={openProjectPicker} disabled={!live || running} title="选择本地主机上的项目"><span className={`status-dot ${connectionError ? 'offline' : ''}`} /><span className="workspace-path">{live ? compact(status.workspace, 52) : 'Demo · demo-workspace'}</span><span className="workspace-chevron">⌄</span></button>
         <div className="top-actions"><button className="icon-button" aria-label="撤销最近修改" onClick={undo}>↶</button><div className="model-chip"><span>◆</span> {status?.model || 'DeepSeek V4 Pro'}</div></div>
       </header>
@@ -587,7 +635,7 @@ export default function Home() {
 
           <div className="timeline" aria-live="polite">
             {connectionError && <div className="connection-banner">{connectionError}</div>}
-            {live ? <LiveTimeline events={events} running={running} /> : <DemoTimeline />}
+            {live ? <LiveTimeline events={events} running={running} onAnswerQuestion={answerEngineeringQuestion} /> : <DemoTimeline />}
             {live && events.length === 0 && (
               <div className="empty-state"><span className="brand-mark"><i /></span><p className="eyebrow">READY</p><h2>把编程任务交给 Yukai</h2><p>你将实时看到模型思考、工具调用、命令输出、文件变更与审批请求。</p><div><button onClick={() => setPrompt('阅读项目结构，告诉我应该从哪里开始。')}>了解项目</button><button onClick={() => setPrompt('运行测试，定位失败原因并提出修复方案。')}>检查测试</button></div></div>
             )}
@@ -597,11 +645,12 @@ export default function Home() {
           <form className="composer" onSubmit={submit}>
             {running && <div className="queue-toast"><span />Agent 正在执行任务</div>}
             <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={live ? '继续交给 Yukai 一个任务…' : '输入任务体验交互效果…'} aria-label="输入任务" rows={2} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-            <div className="composer-foot"><div><button type="button" className="mini-button">＋</button><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span></div><div><button type="button" className={`approval-switch ${status?.automatic_approval ? 'enabled' : ''}`} role="switch" aria-checked={Boolean(status?.automatic_approval)} onClick={toggleAutomaticApproval} disabled={!live || running} title="安全操作可自动通过，高风险命令始终需要人工确认"><span><i /></span>{status?.automatic_approval ? '安全操作自动审批' : '手动审批'}</button>{running ? <button className="stop-task" type="button" onClick={stopTask} disabled={stopping}><span>■</span>{stopping ? '正在停止…' : '停止任务'}</button> : <button className="send" type="submit" disabled={!prompt.trim()}>运行任务 <span>↵</span></button>}</div></div>
+            <div className="composer-foot"><div><button type="button" className={`engineering-toggle ${activeSession.engineeringMode ? 'enabled' : ''}`} onClick={toggleEngineeringMode} disabled={!live || running} title="按需求分析、设计、实现、测试和验收的质量门执行"><span>SE</span>{activeSession.engineeringMode ? '软件工程模式' : '快速模式'}</button><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span></div><div><button type="button" className={`approval-switch ${status?.automatic_approval ? 'enabled' : ''}`} role="switch" aria-checked={Boolean(status?.automatic_approval)} onClick={toggleAutomaticApproval} disabled={!live || running} title="安全操作可自动通过，高风险命令始终需要人工确认"><span><i /></span>{status?.automatic_approval ? '安全操作自动审批' : '手动审批'}</button>{running ? <button className="stop-task" type="button" onClick={stopTask} disabled={stopping}><span>■</span>{stopping ? '正在停止…' : '停止任务'}</button> : <button className="send" type="submit" disabled={!prompt.trim()}>运行任务 <span>↵</span></button>}</div></div>
           </form>
         </section>
 
         <aside className="inspector">
+          {live && activeSession.engineeringMode && activeEngineering && <EngineeringPanel engineering={activeEngineering} />}
           {live && activePlan && <PlanPanel plan={activePlan} />}
           <section className="inspector-section context-section">
             <div className="panel-heading"><span>会话上下文</span><b>{live ? `${contextPercent.toFixed(contextPercent < 1 ? 1 : 0)}%` : '24%'}</b></div><div className="meter"><i style={{ width: `${live ? contextPercent : 24}%` }} /></div><div className="meter-label"><span>{live ? `${activeSession.messageCount} 条消息` : '12 条消息'}</span><span>{live ? `${formatChars(activeSession.contextChars)} / ${formatChars(status?.max_context_chars || 0)}` : '192k / 800k chars'}</span></div>
@@ -650,12 +699,13 @@ function SessionListItem({ session, active, running, time, menuOpen, confirmingD
   </div>;
 }
 
-function LiveTimeline({ events, running }: { events: AgentEvent[]; running: boolean }) {
+function LiveTimeline({ events, running, onAnswerQuestion }: { events: AgentEvent[]; running: boolean; onAnswerQuestion: (question: EngineeringQuestion, option: EngineeringOption) => void }) {
   const approvalDecisions = new Map(
     events
       .filter((event) => event.type === 'approval_decision' && event.approval_id)
       .map((event) => [event.approval_id as string, event])
   );
+  const currentQuestionId = [...events].reverse().find((event) => event.type === 'engineering_state')?.engineering?.pending_question?.question_id;
   return <>{events.map((event, index) => {
     if (event.type === 'run_started') return null;
     if (event.type === 'user') return <article className="user-turn" key={index}><div className="avatar user-avatar">FY</div><div className="turn-body"><div className="turn-meta"><b>你</b><time>{event.timestamp}</time></div><p>{event.message}</p></div></article>;
@@ -670,6 +720,11 @@ function LiveTimeline({ events, running }: { events: AgentEvent[]; running: bool
     }
     if (event.type === 'approval_decision') return event.approval_id ? null : <div className="notice-row" key={index}>审批结果：{event.message}</div>;
     if (event.type === 'plan_incomplete') return <div className="notice-row" key={index}>计划尚未完成：{event.unfinished?.join('、')}</div>;
+    if (event.type === 'engineering_state') return null;
+    if (event.type === 'engineering_question' && event.question) {
+      const active = currentQuestionId === event.question.question_id;
+      return <article className={`engineering-question ${active ? 'active' : 'resolved'}`} key={index}><p className="eyebrow">ENGINEERING DECISION</p><h3>{event.question.question}</h3><p>{event.question.reason}</p><div>{event.question.options.map((option) => <button type="button" key={option.id} disabled={!active || running} onClick={() => onAnswerQuestion(event.question as EngineeringQuestion, option)}><b>{option.label}</b>{option.description && <small>{option.description}</small>}</button>)}</div>{!active && <small className="question-resolved">该决策已记录</small>}</article>;
+    }
     if (event.type === 'final') {
       const finalState = finalStatus(event.stop_reason);
       return <article className="agent-turn live-answer" key={index}><div className="avatar agent-avatar"><span>Y</span></div><div className="turn-body"><div className="turn-meta"><b>Yukai</b><span className="thinking-label">{finalState.meta}</span><time>{event.timestamp}</time></div><div className="answer-card"><div className="answer-title"><span>{finalState.icon}</span><b>{finalState.title}</b><small>{event.steps} 个模型步骤</small></div><MarkdownText text={event.text || ''} /></div></div></article>;
@@ -695,6 +750,20 @@ function ToolResult({ event }: { event: AgentEvent }) {
         ? `exit ${result.exit_code}`
         : '';
   return <div className={`tool-result-row ${ok ? 'ok' : 'failed'}`}><span>{ok ? '✓' : '×'}</span><div><b>{ok ? '执行成功' : '执行失败'} · {event.tool}</b><small>{detail}</small>{output && <pre>{compact(output, 1600)}</pre>}</div></div>;
+}
+
+function EngineeringPanel({ engineering }: { engineering: EngineeringState }) {
+  const linkedRequirements = new Set([
+    ...engineering.implementation_links.map((item) => item.requirement_id),
+    ...engineering.test_links.map((item) => item.requirement_id),
+  ]).size;
+  return <section className="inspector-section engineering-panel">
+    <div className="panel-heading"><span>Yukai-SE 工程流程</span><b>{engineering.status === 'completed' ? 'DONE' : 'ACTIVE'}</b></div>
+    <div className="active-skill"><span>SE</span><div><b>{engineering.active_skill?.title || '软件工程 Skill'}</b><small>{engineering.active_skill?.description}</small></div></div>
+    <div className="engineering-phases">{engineering.phases.map((phase) => <div className={`engineering-phase ${phase.status}`} key={phase.id}><span>{phase.status === 'completed' ? '✓' : phase.status === 'active' || phase.status === 'awaiting_user' ? '●' : '○'}</span><div><b>{phase.title}</b><small>{phase.gate.passed ? '质量门已满足' : phase.gate.missing[0] || '等待前序阶段'}</small></div></div>)}</div>
+    <div className="engineering-stats"><div><b>{engineering.requirements.length}</b><span>需求</span></div><div><b>{engineering.design_modules.length}</b><span>模块</span></div><div><b>{linkedRequirements}</b><span>追踪项</span></div></div>
+    <small className="engineering-artifacts">产物保存在 <code>.yukai/engineering</code></small>
+  </section>;
 }
 
 function PlanPanel({ plan }: { plan: TaskPlan }) {
@@ -786,8 +855,8 @@ function DemoActivity({ icon, title, detail, meta, warning = false }: { icon: st
   return <div className={`activity done ${warning ? 'warning' : ''}`}><span className="activity-icon">{icon}</span><div><b>{title}</b><small>{detail}</small></div><span className={meta === 'PASS' ? 'pass-badge' : warning ? 'exit-badge' : 'duration'}>{meta}</span></div>;
 }
 
-function toolIcon(tool?: string) { return ({ list_files: '⌕', read_file: '≡', search_text: '⌕', write_file: '+', edit_file: '±', make_directory: '□', run_command: '›_', update_plan: '✓' } as Record<string, string>)[tool || ''] || '◆'; }
-function toolLabel(event: AgentEvent) { const args = event.arguments || {}; const path = String(args.path || '.'); return ({ list_files: `浏览 ${path}`, read_file: `读取 ${path}`, search_text: `搜索 “${args.query || ''}”`, write_file: `写入 ${path}`, edit_file: `编辑 ${path}`, make_directory: `创建目录 ${path}`, run_command: `运行 ${compact(String(args.command || ''), 90)}`, update_plan: `更新计划 · ${compact(String(args.summary || '当前任务'), 60)}` } as Record<string, string>)[event.tool || ''] || String(event.tool || 'Agent 操作'); }
+function toolIcon(tool?: string) { return ({ list_files: '⌕', read_file: '≡', search_text: '⌕', write_file: '+', edit_file: '±', make_directory: '□', run_command: '›_', update_plan: '✓', update_engineering_state: 'SE', request_user_input: '?' } as Record<string, string>)[tool || ''] || '◆'; }
+function toolLabel(event: AgentEvent) { const args = event.arguments || {}; const path = String(args.path || '.'); return ({ list_files: `浏览 ${path}`, read_file: `读取 ${path}`, search_text: `搜索 “${args.query || ''}”`, write_file: `写入 ${path}`, edit_file: `编辑 ${path}`, make_directory: `创建目录 ${path}`, run_command: `运行 ${compact(String(args.command || ''), 90)}`, update_plan: `更新计划 · ${compact(String(args.summary || '当前任务'), 60)}`, update_engineering_state: `更新工程流程 · ${String(args.action || '')}`, request_user_input: `请求工程决策 · ${compact(String(args.question || ''), 60)}` } as Record<string, string>)[event.tool || ''] || String(event.tool || 'Agent 操作'); }
 function toolDetail(event: AgentEvent) { const args = event.arguments || {}; if (event.tool === 'run_command') return String(args.command || ''); if (args.content_lines) return `${args.content_lines} 行内容`; if (args.old_text_lines || args.new_text_lines) return `替换 ${args.old_text_lines || 0} → ${args.new_text_lines || 0} 行`; return String(args.path || args.query || ''); }
 function riskReasonLabel(reason: string) {
   return ({
@@ -812,6 +881,7 @@ function createConversationSession(): ConversationSession {
     contextChars: 0,
     messageCount: 0,
     contextCompactions: 0,
+    engineeringMode: false,
   };
 }
 function sessionTime(updatedAt: number) {
@@ -825,7 +895,7 @@ function compact(value: string, limit: number) { const normalized = value.replac
 function formatChars(value: number) { if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m chars`; if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k chars`; return `${value} chars`; }
 function planStatusLabel(status: PlanStep['status']) { return ({ pending: '等待执行', in_progress: '正在执行', completed: '证据已确认', blocked: '任务被阻塞' })[status]; }
 function blockerTypeLabel(type?: PlanStep['blocker_type']) { return ({ tool_failure: '工具执行失败', missing_prerequisite: '缺少前置条件', environment: '环境限制', user_input_required: '等待用户输入' } as Record<string, string>)[type || ''] || '任务被阻塞'; }
-function finalStatus(reason?: string) { if (reason === 'completed') return { icon: '✓', title: '完成', meta: '任务完成' }; if (reason === 'blocked') return { icon: '!', title: '任务被阻塞', meta: '需要处理' }; if (reason === 'incomplete_plan') return { icon: '!', title: '计划未完成', meta: '未完成' }; return { icon: '■', title: '任务已停止', meta: '已停止' }; }
+function finalStatus(reason?: string) { if (reason === 'completed') return { icon: '✓', title: '完成', meta: '任务完成' }; if (reason === 'awaiting_user') return { icon: '?', title: '等待你的工程决策', meta: '等待确认' }; if (reason === 'blocked') return { icon: '!', title: '任务被阻塞', meta: '需要处理' }; if (reason === 'incomplete_plan') return { icon: '!', title: '计划未完成', meta: '未完成' }; return { icon: '■', title: '任务已停止', meta: '已停止' }; }
 
 function MarkdownText({ text }: { text: string }) {
   const lines = text.replace(/\r\n/g, '\n').split('\n');

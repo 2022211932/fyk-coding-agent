@@ -11,6 +11,7 @@ from . import __version__
 from .agent import CodingAgent, RunResult
 from .client import ModelError, OpenAICompatibleClient
 from .config import Settings
+from .engineering import EngineeringWorkflow
 from .tools import ToolRegistry
 from .ui import TerminalUI
 from .workspace import Workspace, WorkspaceError
@@ -32,6 +33,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps", type=int, help="Maximum model steps per user prompt")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI terminal colors")
     parser.add_argument("--web", action="store_true", help="Open the local visual Agent console")
+    parser.add_argument(
+        "--engineering",
+        action="store_true",
+        help="Use the evidence-gated software-engineering lifecycle",
+    )
     parser.add_argument("--api-port", type=int, default=8765, help=argparse.SUPPRESS)
     parser.add_argument("--frontend-port", type=int, default=3000, help=argparse.SUPPRESS)
     parser.add_argument("--version", action="version", version=f"Yukai {__version__}")
@@ -88,12 +94,14 @@ def main(argv: list[str] | None = None) -> int:
 
     approvals = ApprovalController(ui, approve_all=args.yes)
     registry = ToolRegistry(workspace, approve=approvals, approve_risky=approvals.require_explicit)
+    engineering = EngineeringWorkflow(workspace.root) if args.engineering else None
     agent = CodingAgent(
         OpenAICompatibleClient(settings),
         registry,
         max_steps=settings.max_steps,
         max_context_chars=settings.max_context_chars,
         notify=lambda kind, data: _terminal_notification(ui, kind, data),
+        engineering=engineering,
     )
     if args.web:
         if args.task:
@@ -122,9 +130,9 @@ def main(argv: list[str] | None = None) -> int:
     task = " ".join(args.task).strip()
     try:
         if task:
-            result = _run_task(agent, task, ui)
+            result = _run_task(agent, task, ui, engineering=engineering)
             return 0 if result.stop_reason == "completed" else 3
-        return _interactive_loop(agent, registry, approvals, settings, ui)
+        return _interactive_loop(agent, registry, approvals, settings, ui, engineering=engineering)
     except KeyboardInterrupt:
         ui.error("\nCancelled by user.")
         return 130
@@ -139,6 +147,7 @@ def _interactive_loop(
     approvals: ApprovalController,
     settings: Settings,
     ui: TerminalUI,
+    engineering: EngineeringWorkflow | None = None,
 ) -> int:
     history: list[dict[str, Any]] | None = None
     while True:
@@ -182,7 +191,7 @@ def _interactive_loop(
             ui.error(f"Unknown command: {task}. Use /help to list commands.")
             continue
         try:
-            result = _run_task(agent, task, ui, history=history)
+            result = _run_task(agent, task, ui, history=history, engineering=engineering)
             history = result.messages
         except ModelError as exc:
             ui.error(f"Model error: {exc}")
@@ -194,8 +203,19 @@ def _run_task(
     ui: TerminalUI,
     *,
     history: list[dict[str, Any]] | None = None,
+    engineering: EngineeringWorkflow | None = None,
 ) -> RunResult:
     result = agent.run(task, history=history)
+    while result.stop_reason == "awaiting_user" and engineering is not None:
+        question = engineering.payload().get("pending_question")
+        if not isinstance(question, dict):
+            break
+        option_id, answer = ui.engineering_question(question)
+        engineering.answer_question(
+            str(question["question_id"]), option_id=option_id, answer=answer
+        )
+        follow_up = f"用户对工程决策“{question['question']}”的回答是“{answer}”。请继续执行。"
+        result = agent.run(follow_up, history=result.messages)
     ui.answer(
         result.final_text,
         steps=result.steps,

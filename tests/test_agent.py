@@ -6,6 +6,7 @@ import unittest
 
 from fyk_agent.agent import CodingAgent
 from fyk_agent.client import AssistantReply
+from fyk_agent.engineering import EngineeringWorkflow
 from fyk_agent.tools import ToolRegistry
 from fyk_agent.workspace import Workspace
 
@@ -237,6 +238,32 @@ class AgentLoopTests(unittest.TestCase):
         result = CodingAgent(client, self.registry).run("Contact the service")
         self.assertEqual(result.stop_reason, "blocked")
         self.assertTrue(result.final_text.startswith("任务未完成："))
+
+    def test_engineering_question_pauses_with_valid_tool_protocol(self) -> None:
+        workflow = EngineeringWorkflow(self.registry.workspace.root)
+        question = {
+            "question_id": "scope-1",
+            "decision_key": "scope_choice",
+            "question": "首版是否需要用户注册？",
+            "reason": "该选择会改变数据模型和验收范围。",
+            "options": [
+                {"id": "yes", "label": "需要"},
+                {"id": "no", "label": "暂不需要"},
+            ],
+        }
+        client = FakeClient([named_tool_reply("request_user_input", question, "question-1")])
+        events: list[tuple[str, dict]] = []
+        result = CodingAgent(
+            client,
+            self.registry,
+            engineering=workflow,
+            notify=lambda kind, data: events.append((kind, data)),
+        ).run("开发一个新系统")
+
+        self.assertEqual(result.stop_reason, "awaiting_user")
+        self.assertEqual(result.messages[-1]["role"], "tool")
+        self.assertEqual(workflow.payload()["pending_question"]["question_id"], "scope-1")
+        self.assertTrue(any(kind == "engineering_question" for kind, _ in events))
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from fyk_agent.config import Settings
+from fyk_agent.client import AssistantReply
 from fyk_agent.tools import ToolRegistry
 from fyk_agent.web import (
     PendingApproval,
@@ -73,6 +74,53 @@ class WebConsoleTests(unittest.TestCase):
             payload = json.load(response)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["model"], "test-model")
+        self.assertEqual(payload["engineering"]["phase"], "requirements")
+
+    def test_engineering_mode_is_persisted_per_session(self) -> None:
+        with self.post(
+            "/api/sessions/update",
+            {"session_id": "se-session", "engineering_mode": True},
+        ) as response:
+            self.assertTrue(json.load(response)["ok"])
+        self.assertTrue(self.state.session("se-session").engineering_mode)
+
+        restored = WebAgentState(
+            self.state.settings,
+            Workspace(self.root),
+            "new-token",
+            3000,
+            False,
+            config_path=self.config_path,
+        )
+        self.assertTrue(restored.session("se-session").engineering_mode)
+
+        with self.request("/api/engineering") as response:
+            payload = json.load(response)
+        self.assertEqual(payload["engineering"]["active_skill"]["id"], "requirements-analysis")
+
+    def test_chat_can_run_with_engineering_mode_enabled(self) -> None:
+        class FakeClient:
+            def complete(self, _messages, _tools):
+                return AssistantReply(
+                    "工程模式已启动。",
+                    [],
+                    {"role": "assistant", "content": "工程模式已启动。"},
+                )
+
+        with patch("fyk_agent.web.OpenAICompatibleClient", return_value=FakeClient()):
+            with self.post(
+                "/api/chat",
+                {
+                    "session_id": "engineering-chat",
+                    "message": "分析需求",
+                    "engineering_mode": True,
+                },
+            ) as response:
+                records = [json.loads(line) for line in response.read().decode("utf-8").splitlines()]
+
+        self.assertTrue(any(item["type"] == "engineering_state" for item in records))
+        self.assertEqual(records[-1]["stop_reason"], "completed")
+        self.assertTrue(self.state.session("engineering-chat").engineering_mode)
 
     def test_cross_origin_browser_request_is_rejected(self) -> None:
         with self.assertRaises(HTTPError) as error:

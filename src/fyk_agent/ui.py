@@ -110,6 +110,25 @@ class TerminalUI:
         except EOFError:
             return "n"
 
+    def engineering_question(self, question: dict[str, Any]) -> tuple[str, str]:
+        self.write("\n" + self.paint("Software engineering decision required", BLUE + BOLD))
+        self.write(f"  {question.get('question', '')}")
+        if question.get("reason"):
+            self.write(self.paint(f"  Why: {question['reason']}", DIM))
+        options = question.get("options", [])
+        for index, option in enumerate(options, 1):
+            description = f" - {option.get('description')}" if option.get("description") else ""
+            self.write(f"  {index}. {option.get('label', option.get('id'))}{description}")
+        while True:
+            try:
+                answer = input(self.paint("  Choose an option number: ", BLUE)).strip()
+            except EOFError:
+                answer = ""
+            if answer.isdigit() and 1 <= int(answer) <= len(options):
+                selected = options[int(answer) - 1]
+                return str(selected["id"]), str(selected.get("label", selected["id"]))
+            self.error("Please enter one of the listed option numbers.")
+
     def help(self) -> None:
         self.write(
             """
@@ -173,6 +192,8 @@ def _tool_label(name: str, arguments: dict[str, Any]) -> str:
         "make_directory": f"Mkdir {path}",
         "run_command": f"Bash {_one_line(str(arguments.get('command', '')), 110)}",
         "update_plan": f"Plan {str(arguments.get('summary', 'task'))[:90]}",
+        "update_engineering_state": f"Engineering {arguments.get('action', 'update')}",
+        "request_user_input": f"Ask {str(arguments.get('question', 'engineering decision'))[:90]}",
     }
     return labels.get(name, f"{name} {_one_line(json.dumps(arguments, ensure_ascii=False), 100)}")
 
@@ -192,6 +213,11 @@ def _result_detail(name: str, result: dict[str, Any]) -> str:
         if name == "update_plan":
             plan = result.get("plan", {})
             return f"{plan.get('completed', 0)}/{plan.get('total', 0)} steps completed"
+        if name == "update_engineering_state":
+            engineering = result.get("engineering", {})
+            return f"phase {engineering.get('phase', 'requirements')}"
+        if name == "request_user_input":
+            return "waiting for user decision"
         return "done"
     error = str(result.get("error") or result.get("error_type") or "failed")
     return _one_line(error, 140)

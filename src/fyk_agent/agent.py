@@ -11,6 +11,7 @@ from typing import Any, Callable, Protocol
 
 from .client import AssistantReply
 from .context import ContextManager, message_size
+from .engineering import EngineeringWorkflow
 from .events import EventLog
 from .planning import PlanTracker
 from .tools import ToolRegistry
@@ -69,6 +70,7 @@ class CodingAgent:
         max_context_chars: int = 800_000,
         notify: Callable[[str, dict[str, Any]], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        engineering: EngineeringWorkflow | None = None,
     ):
         self.client = client
         self.tools = tools
@@ -79,6 +81,7 @@ class CodingAgent:
         self._supports_cancellation = cancelled is not None
         self.cancelled = cancelled or (lambda: False)
         self.plan = PlanTracker()
+        self.engineering = engineering
 
     def run(
         self,
@@ -90,6 +93,8 @@ class CodingAgent:
         self.plan.reset()
         plan_completion_reminders = 0
         self.notify("plan_reset", {"step": 0})
+        if self.engineering is not None:
+            self.notify("engineering_state", {"engineering": self.engineering.payload()})
         if history is None:
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": self._system_prompt()},
@@ -99,6 +104,7 @@ class CodingAgent:
             if not history or history[0].get("role") != "system":
                 raise ValueError("Conversation history must begin with a system message")
             messages = [dict(message) for message in history]
+            messages[0] = {"role": "system", "content": self._system_prompt()}
             messages.append({"role": "user", "content": task.strip()})
         self.events.emit(
             "run_started",
@@ -172,7 +178,8 @@ class CodingAgent:
                     self.context.compactions,
                 )
 
-            for call in reply.tool_calls:
+            awaiting_user = False
+            for call_index, call in enumerate(reply.tool_calls):
                 if self.cancelled():
                     return self._cancelled_result(messages, step)
                 call_id, name, arguments, parse_error = _parse_tool_call(call)
@@ -192,6 +199,20 @@ class CodingAgent:
                         plan_payload = self.plan.payload()
                         self.events.emit("plan_updated", step=step, plan=plan_payload)
                         self.notify("plan_updated", {"step": step, "plan": plan_payload})
+                elif name == "update_engineering_state" and self.engineering is not None:
+                    result = self.engineering.update(arguments, self.plan.evidence)
+                    if result.get("ok"):
+                        payload = self.engineering.payload()
+                        self.events.emit("engineering_updated", step=step, engineering=payload)
+                        self.notify("engineering_state", {"step": step, "engineering": payload})
+                elif name == "request_user_input" and self.engineering is not None:
+                    result = self.engineering.request_user_input(arguments)
+                    if result.get("ok"):
+                        awaiting_user = True
+                        payload = self.engineering.payload()
+                        self.events.emit("engineering_question", step=step, question=result["question"])
+                        self.notify("engineering_question", {"step": step, "question": result["question"]})
+                        self.notify("engineering_state", {"step": step, "engineering": payload})
                 else:
                     result = self.tools.execute(name, arguments)
                     evidence_id = self.plan.register_evidence(
@@ -217,6 +238,33 @@ class CodingAgent:
                 )
                 if self.cancelled():
                     return self._cancelled_result(messages, step)
+                if awaiting_user:
+                    for remaining in reply.tool_calls[call_index + 1 :]:
+                        remaining_id, remaining_name, _, _ = _parse_tool_call(remaining)
+                        skipped = {
+                            "ok": False,
+                            "error": "Skipped because the workflow is awaiting user input",
+                            "error_type": "skipped_awaiting_user",
+                        }
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": remaining_id,
+                                "name": remaining_name,
+                                "content": json.dumps(skipped, ensure_ascii=False),
+                            }
+                        )
+                    question = result["question"]
+                    final_text = "需要你确认后才能继续：" + question["question"]
+                    self.events.emit("run_finished", reason="awaiting_user", steps=step)
+                    self.notify("finished", {"step": step, "reason": "awaiting_user"})
+                    return RunResult(
+                        final_text,
+                        step,
+                        "awaiting_user",
+                        messages,
+                        self.context.compactions,
+                    )
 
             previous_count = self.context.compactions
             messages = self.context.compact(messages)
@@ -272,13 +320,14 @@ class CodingAgent:
             return outcome
 
     def _model_tools(self) -> list[dict[str, Any]]:
-        return [*self.tools.schemas, self.plan.schema]
+        engineering_schemas = self.engineering.schemas if self.engineering is not None else []
+        return [*self.tools.schemas, self.plan.schema, *engineering_schemas]
 
     def _system_prompt(self) -> str:
         shell = os.environ.get("COMSPEC" if os.name == "nt" else "SHELL")
         if not shell:
             shell = "cmd.exe" if os.name == "nt" else "/bin/sh"
-        return (
+        prompt = (
             SYSTEM_PROMPT
             + "\nRuntime context (authoritative):\n"
             + f"- Operating system: {platform.system() or os.name}\n"
@@ -286,6 +335,9 @@ class CodingAgent:
             + f"- Current workspace: {self.tools.workspace.root}\n"
             + "Choose commands valid for this operating system and shell."
         )
+        if self.engineering is not None:
+            prompt += self.engineering.system_context()
+        return prompt
 
     def _notify_context(self, messages: list[dict[str, Any]], *, step: int) -> None:
         self.notify(

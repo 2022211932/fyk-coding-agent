@@ -22,6 +22,7 @@ from .agent import CodingAgent
 from .client import ModelError, OpenAICompatibleClient
 from .config import Settings
 from .context import message_size
+from .engineering import EngineeringError, EngineeringWorkflow
 from .tools import ToolRegistry
 from .workspace import Workspace
 
@@ -42,6 +43,7 @@ class WebSession:
     archived: bool = False
     updated_at: float = field(default_factory=lambda: time.time() * 1000)
     context_compactions: int = 0
+    engineering_mode: bool = False
     running: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event)
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -65,6 +67,7 @@ class WebAgentState:
         self.config_path = config_path or _default_config_path()
         self.state_lock = threading.RLock()
         self.sessions: dict[str, WebSession] = _load_web_sessions(workspace)
+        self.engineering = EngineeringWorkflow(workspace.root)
         self.sessions_lock = threading.Lock()
         self.approvals: dict[str, PendingApproval] = {}
         self.approvals_lock = threading.Lock()
@@ -106,6 +109,7 @@ class WebAgentState:
                         "context_chars": sum(message_size(message) for message in session.history or []),
                         "message_count": len(session.history or []),
                         "context_compactions": session.context_compactions,
+                        "engineering_mode": session.engineering_mode,
                     }
                     for session_id, session in self.sessions.items()
                 ]
@@ -119,6 +123,7 @@ class WebAgentState:
         title: str | None = None,
         pinned: bool | None = None,
         archived: bool | None = None,
+        engineering_mode: bool | None = None,
     ) -> WebSession:
         with self.state_lock:
             with self.sessions_lock:
@@ -129,6 +134,8 @@ class WebAgentState:
                     session.pinned = pinned
                 if archived is not None:
                     session.archived = archived
+                if engineering_mode is not None:
+                    session.engineering_mode = engineering_mode
                 session.updated_at = time.time() * 1000
                 self._persist_sessions_locked()
                 return session
@@ -205,6 +212,7 @@ class WebAgentState:
                     "archived": session.archived,
                     "updated_at": session.updated_at,
                     "context_compactions": session.context_compactions,
+                    "engineering_mode": session.engineering_mode,
                 }
                 for session_id, session in sorted(
                     self.sessions.items(), key=lambda item: item[1].updated_at, reverse=True
@@ -232,6 +240,7 @@ class WebAgentState:
                 "workspace": str(self.workspace.root),
                 "automatic_approval": self.automatic_approval,
                 "max_context_chars": self.settings.max_context_chars,
+                "engineering": self.engineering.payload(),
             }
 
     def set_automatic_approval(self, enabled: bool) -> dict[str, Any]:
@@ -250,6 +259,7 @@ class WebAgentState:
                     return False, {"ok": False, "error": "任务运行时不能切换工作区"}
                 self.workspace = selected
                 self.sessions = _load_web_sessions(selected)
+                self.engineering = EngineeringWorkflow(selected.root)
             result = self.status()
             try:
                 _remember_workspace(selected.root, self.config_path)
@@ -414,7 +424,7 @@ def run_web_console(
 
 def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "YukaiWeb/0.2"
+        server_version = "YukaiWeb/0.3"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return
@@ -438,6 +448,9 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                 return
             if parsed.path == "/api/sessions":
                 self._json(200, state.sessions_payload())
+                return
+            if parsed.path == "/api/engineering":
+                self._json(200, {"ok": True, "engineering": state.engineering.payload()})
                 return
             if parsed.path == "/api/projects":
                 self._json(200, state.projects())
@@ -508,6 +521,7 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                 title = body.get("title")
                 pinned = body.get("pinned")
                 archived = body.get("archived")
+                engineering_mode = body.get("engineering_mode")
                 if title is not None and not isinstance(title, str):
                     self._json(400, {"ok": False, "error": "title must be a string"})
                     return
@@ -517,8 +531,22 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                 if archived is not None and not isinstance(archived, bool):
                     self._json(400, {"ok": False, "error": "archived must be boolean"})
                     return
-                state.update_session(session_id, title=title, pinned=pinned, archived=archived)
+                if engineering_mode is not None and not isinstance(engineering_mode, bool):
+                    self._json(400, {"ok": False, "error": "engineering_mode must be boolean"})
+                    return
+                state.update_session(
+                    session_id,
+                    title=title,
+                    pinned=pinned,
+                    archived=archived,
+                    engineering_mode=engineering_mode,
+                )
                 self._json(200, {"ok": True})
+                return
+            if parsed.path == "/api/engineering/reset":
+                with state.state_lock:
+                    payload = state.engineering.reset()
+                self._json(200, {"ok": True, "engineering": payload})
                 return
             approval_match = re.fullmatch(r"/api/approvals/([A-Za-z0-9_-]+)", parsed.path)
             if approval_match:
@@ -567,8 +595,16 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
         def _chat(self, body: dict[str, Any]) -> None:
             message = str(body.get("message", "")).strip()
             session_id = str(body.get("session_id", "default"))[:100]
+            engineering_mode = body.get("engineering_mode", False)
+            engineering_answer = body.get("engineering_answer")
             if not message or len(message) > 100_000:
                 self._json(400, {"ok": False, "error": "message is empty or too large"})
+                return
+            if not isinstance(engineering_mode, bool):
+                self._json(400, {"ok": False, "error": "engineering_mode must be boolean"})
+                return
+            if engineering_answer is not None and not isinstance(engineering_answer, dict):
+                self._json(400, {"ok": False, "error": "engineering_answer must be an object"})
                 return
             with state.state_lock:
                 session = state.session(session_id)
@@ -579,6 +615,20 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                     session.running = True
                     session.cancel_event.clear()
                 workspace = state.workspace
+
+            state.update_session(session_id, engineering_mode=engineering_mode)
+            if engineering_answer is not None:
+                try:
+                    state.engineering.answer_question(
+                        str(engineering_answer.get("question_id", "")),
+                        option_id=str(engineering_answer.get("option_id", "")),
+                        answer=str(engineering_answer.get("answer", "")),
+                    )
+                except EngineeringError as exc:
+                    with session.lock:
+                        session.running = False
+                    self._json(409, {"ok": False, "error": str(exc)})
+                    return
 
             if session.title == "新会话":
                 state.update_session(session_id, title=_compact_title(message))
@@ -630,6 +680,7 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                 max_context_chars=state.settings.max_context_chars,
                 notify=emit,
                 cancelled=session.cancel_event.is_set,
+                engineering=state.engineering if engineering_mode else None,
             )
             agent.context.compactions = session.context_compactions
             try:
@@ -766,6 +817,7 @@ def _load_web_sessions(workspace: Workspace) -> dict[str, WebSession]:
             archived=bool(raw.get("archived", False)),
             updated_at=updated_at,
             context_compactions=context_compactions,
+            engineering_mode=bool(raw.get("engineering_mode", False)),
         )
     return sessions
 
