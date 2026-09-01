@@ -13,7 +13,7 @@ from .client import AssistantReply
 from .context import ContextManager, message_size
 from .engineering import EngineeringWorkflow
 from .events import EventLog
-from .planning import PlanTracker
+from .planning import PlanTracker, _is_verification_command
 from .tools import ToolRegistry
 
 
@@ -120,6 +120,7 @@ class CodingAgent:
         for step in range(1, self.max_steps + 1):
             if self.cancelled():
                 return self._cancelled_result(messages, step - 1)
+            messages = self._compact_context(messages, step=step - 1)
             self.notify("model_request", {"step": step, "message_count": len(messages)})
             self.events.emit("model_request", step=step, message_count=len(messages))
             try:
@@ -205,7 +206,7 @@ class CodingAgent:
                             "message": (
                                 "Ignored update_plan because Yukai-SE's engineering lifecycle is the authoritative plan"
                             ),
-                            "engineering": self.engineering.payload(),
+                            "engineering": self.engineering.tool_snapshot(),
                         }
                     else:
                         result = self.plan.update(arguments)
@@ -218,13 +219,14 @@ class CodingAgent:
                     evidence_id = self.plan.register_evidence(
                         name, arguments, result, step=step, evidence_id=call_id
                     )
-                    self.engineering.record_evidence(
-                        self.plan.evidence[evidence_id], arguments, result
-                    )
                     result = {**result, "evidence_id": evidence_id}
                     if result.get("ok"):
                         payload = self.engineering.payload()
-                        self.events.emit("engineering_updated", step=step, engineering=payload)
+                        self.events.emit(
+                            "engineering_updated",
+                            step=step,
+                            engineering=self.engineering.tool_snapshot(),
+                        )
                         self.notify("engineering_state", {"step": step, "engineering": payload})
                         engineering_completed = (
                             arguments.get("action") == "complete_project"
@@ -235,9 +237,6 @@ class CodingAgent:
                     evidence_id = self.plan.register_evidence(
                         name, arguments, result, step=step, evidence_id=call_id
                     )
-                    self.engineering.record_evidence(
-                        self.plan.evidence[evidence_id], arguments, result
-                    )
                     result = {**result, "evidence_id": evidence_id}
                     if result.get("ok"):
                         awaiting_user = True
@@ -246,19 +245,9 @@ class CodingAgent:
                         self.notify("engineering_question", {"step": step, "question": result["question"]})
                         self.notify("engineering_state", {"step": step, "engineering": payload})
                 else:
-                    if (
-                        self.engineering is not None
-                        and self.engineering.is_completed
-                        and name in {"write_file", "edit_file", "make_directory", "run_command"}
-                    ):
-                        result = {
-                            "ok": False,
-                            "error": (
-                                "The accepted project is read-only. Start a change request by moving the "
-                                "engineering lifecycle back to the affected phase before changing files or running commands."
-                            ),
-                            "error_type": "accepted_project_is_read_only",
-                        }
+                    phase_error = self._engineering_tool_guard(name, arguments)
+                    if phase_error is not None:
+                        result = phase_error
                     else:
                         result = self.tools.execute(name, arguments)
                     evidence_id = self.plan.register_evidence(
@@ -324,27 +313,24 @@ class CodingAgent:
                         self.context.compactions,
                     )
 
-            previous_count = self.context.compactions
-            messages = self.context.compact(messages)
-            if self.context.compactions > previous_count:
-                self.events.emit(
-                    "context_compacted",
-                    step=step,
-                    message_count=len(messages),
-                    total_compactions=self.context.compactions,
-                )
+            messages = self._compact_context(messages, step=step)
             self._notify_context(messages, step=step)
 
+        engineering_checkpoint = self.engineering is not None
         final_text = (
-            f"Stopped after reaching the configured limit of {self.max_steps} model steps. "
+            f"工程任务已到达本轮 {self.max_steps} 步检查点，当前工程状态和证据已保存。"
+            "发送“继续任务”即可从当前阶段继续，不会丢失已完成工作。"
+            if engineering_checkpoint
+            else f"Stopped after reaching the configured limit of {self.max_steps} model steps. "
             "Review the latest tool results before continuing."
         )
-        self.events.emit("run_finished", reason="step_limit", steps=self.max_steps)
-        self.notify("finished", {"step": self.max_steps, "reason": "step_limit"})
+        reason = "checkpoint" if engineering_checkpoint else "step_limit"
+        self.events.emit("run_finished", reason=reason, steps=self.max_steps)
+        self.notify("finished", {"step": self.max_steps, "reason": reason})
         return RunResult(
             final_text,
             self.max_steps,
-            "step_limit",
+            reason,
             messages,
             self.context.compactions,
         )
@@ -409,6 +395,73 @@ class CodingAgent:
                 "max_context_chars": self.context.max_chars,
             },
         )
+
+    def _compact_context(
+        self, messages: list[dict[str, Any]], *, step: int
+    ) -> list[dict[str, Any]]:
+        previous_count = self.context.compactions
+        compacted = self.context.compact(messages)
+        if self.context.compactions > previous_count:
+            self.events.emit(
+                "context_compacted",
+                step=step,
+                message_count=len(compacted),
+                total_compactions=self.context.compactions,
+            )
+            self.notify(
+                "context_compacted",
+                {
+                    "step": step,
+                    "message_count": len(compacted),
+                    "context_compactions": self.context.compactions,
+                },
+            )
+            self._notify_context(compacted, step=step)
+        return compacted
+
+    def _engineering_tool_guard(
+        self, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        if self.engineering is None:
+            return None
+        mutating_tools = {"write_file", "edit_file", "make_directory"}
+        if self.engineering.is_completed and name in {*mutating_tools, "run_command"}:
+            return {
+                "ok": False,
+                "error": (
+                    "The accepted project is read-only. Ask for a completed_project_change "
+                    "decision before moving the lifecycle back to an affected phase."
+                ),
+                "error_type": "accepted_project_is_read_only",
+                "actual_phase": self.engineering.phase,
+                "allowed_phase": "implementation",
+            }
+        if name in mutating_tools and self.engineering.phase != "implementation":
+            return {
+                "ok": False,
+                "error": (
+                    f"{name} cannot modify project files during the {self.engineering.phase} phase. "
+                    "Move the lifecycle back to implementation before changing files."
+                ),
+                "error_type": "engineering_phase_read_only",
+                "actual_phase": self.engineering.phase,
+                "allowed_phase": "implementation",
+            }
+        if name == "run_command" and self.engineering.phase != "implementation":
+            command = str(arguments.get("command", ""))
+            if self.engineering.phase != "verification" or not _is_verification_command(command):
+                return {
+                    "ok": False,
+                    "error": (
+                        f"run_command is restricted during the {self.engineering.phase} phase. "
+                        "Only recognized verification commands are allowed in verification; "
+                        "move back to implementation for workspace-changing commands."
+                    ),
+                    "error_type": "engineering_phase_command_restricted",
+                    "actual_phase": self.engineering.phase,
+                    "allowed_phase": "implementation",
+                }
+        return None
 
     def _cancelled_result(
         self, messages: list[dict[str, Any]], steps: int
@@ -512,6 +565,7 @@ def _history_for_mode(
     compatible: list[dict[str, Any]] = []
     for source in history:
         message = dict(source)
+        message.pop("reasoning_content", None)
         if message.get("role") == "assistant" and isinstance(message.get("tool_calls"), list):
             allowed_calls = []
             for call in message["tool_calls"]:

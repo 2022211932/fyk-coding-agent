@@ -32,11 +32,12 @@ type AgentEvent = {
 type PlanEvidence = { id: string; tool: string; ok: boolean; summary: string; step: number; verification: boolean; error_type?: string };
 type PlanStep = { id: string; title: string; kind: 'inspect' | 'change' | 'verify' | 'other'; status: 'pending' | 'in_progress' | 'completed' | 'blocked'; evidence_ids: string[]; note: string; blocker_type?: 'tool_failure' | 'missing_prerequisite' | 'environment' | 'user_input_required' };
 type TaskPlan = { summary: string; steps: PlanStep[]; completed: number; total: number; terminal: boolean; blocked: boolean; evidence: PlanEvidence[] };
-type EngineeringOption = { id: string; label: string; description?: string };
+type EngineeringOption = { id: string; label: string; description?: string; requires_input?: boolean; input_placeholder?: string };
 type EngineeringReview = { requirements: number; design_modules: number; implementation_links: number; verification_links: number; stale_evidence: number; residual_risk: string };
+type EngineeringWorkspaceReview = { project_title: string; requirements: number; workspace: string; warning: string };
 type EngineeringRequirement = { id: string; title: string; kind: 'functional' | 'non_functional'; description: string; acceptance_criteria: string[] };
 type EngineeringBaselineReview = { requirements: EngineeringRequirement[]; assumptions: string[]; digest: string };
-type EngineeringQuestion = { question_id: string; decision_key: string; question: string; reason: string; options: EngineeringOption[]; baseline_review?: EngineeringBaselineReview; review_summary?: EngineeringReview };
+type EngineeringQuestion = { question_id: string; decision_key: string; question: string; reason: string; options: EngineeringOption[]; baseline_review?: EngineeringBaselineReview; review_summary?: EngineeringReview; workspace_review?: EngineeringWorkspaceReview };
 type EngineeringPhase = { id: string; title: string; status: 'pending' | 'active' | 'awaiting_user' | 'completed'; gate: { passed: boolean; missing: string[] } };
 type EngineeringState = {
   phase: string;
@@ -141,7 +142,12 @@ export default function Home() {
   function appendEvent(targetId: string, event: AgentEvent) {
     updateSession(targetId, (session) => ({
       ...session,
-      events: [...session.events, event],
+      events: [
+        ...(event.type === 'context_stats' || event.type === 'engineering_state'
+          ? session.events.filter((item) => item.type !== event.type)
+          : session.events),
+        event,
+      ],
       updatedAt: Date.now(),
       contextChars: event.context_chars ?? session.contextChars,
       messageCount: event.message_count ?? session.messageCount,
@@ -521,10 +527,11 @@ export default function Home() {
     await runMessage(message);
   }
 
-  async function answerEngineeringQuestion(question: EngineeringQuestion, option: EngineeringOption) {
+  async function answerEngineeringQuestion(question: EngineeringQuestion, option: EngineeringOption, answer = '') {
     if (running) return;
-    const message = `关于“${question.question}”，我的选择是“${option.label}”。请记录该决策并继续软件工程流程。`;
-    await runMessage(message, { question_id: question.question_id, option_id: option.id, answer: option.label });
+    const detail = answer.trim();
+    const message = `关于“${question.question}”，我的选择是“${option.label}”。${detail ? `具体说明：${detail}。` : ''}请记录该决策并继续软件工程流程。`;
+    await runMessage(message, { question_id: question.question_id, option_id: option.id, answer: detail || option.label });
   }
 
   async function stopTask() {
@@ -610,7 +617,7 @@ export default function Home() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>Yukai</span><span className="version">v{status?.version || '0.3.2'}</span></div>
+        <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>Yukai</span><span className="version">v{status?.version || '0.3.3'}</span></div>
         <button className="workspace-pill" type="button" onClick={openProjectPicker} disabled={!live || running} title="选择本地主机上的项目"><span className={`status-dot ${connectionError ? 'offline' : ''}`} /><span className="workspace-path">{live ? compact(status.workspace, 52) : 'Demo · demo-workspace'}</span><span className="workspace-chevron">⌄</span></button>
         <div className="top-actions"><button className="icon-button" aria-label="撤销最近修改" onClick={undo}>↶</button><div className="model-chip"><span>◆</span> {status?.model || 'DeepSeek V4 Pro'}</div></div>
       </header>
@@ -702,7 +709,7 @@ function SessionListItem({ session, active, running, time, menuOpen, confirmingD
   </div>;
 }
 
-function LiveTimeline({ events, running, onAnswerQuestion }: { events: AgentEvent[]; running: boolean; onAnswerQuestion: (question: EngineeringQuestion, option: EngineeringOption) => void }) {
+function LiveTimeline({ events, running, onAnswerQuestion }: { events: AgentEvent[]; running: boolean; onAnswerQuestion: (question: EngineeringQuestion, option: EngineeringOption, answer?: string) => Promise<void> }) {
   const approvalDecisions = new Map(
     events
       .filter((event) => event.type === 'approval_decision' && event.approval_id)
@@ -727,7 +734,7 @@ function LiveTimeline({ events, running, onAnswerQuestion }: { events: AgentEven
     if (event.type === 'engineering_state') return null;
     if (event.type === 'engineering_question' && event.question) {
       const active = currentQuestionId === event.question.question_id;
-      return <article className={`engineering-question ${active ? 'active' : 'resolved'}`} key={index}><p className="eyebrow">ENGINEERING DECISION</p><h3>{event.question.question}</h3><p>{event.question.reason}</p>{event.question.baseline_review && <EngineeringBaselineReviewPanel review={event.question.baseline_review} />}{event.question.review_summary && <EngineeringReviewSummary review={event.question.review_summary} />}<div>{event.question.options.map((option) => <button type="button" key={option.id} disabled={!active || running} onClick={() => onAnswerQuestion(event.question as EngineeringQuestion, option)}><b>{option.label}</b>{option.description && <small>{option.description}</small>}</button>)}</div>{!active && <small className="question-resolved">该决策已记录</small>}</article>;
+      return <EngineeringQuestionCard key={index} question={event.question} active={active} running={running} onAnswer={onAnswerQuestion} />;
     }
     if (event.type === 'final') {
       const finalState = finalStatus(event.stop_reason);
@@ -757,7 +764,24 @@ function ToolResult({ event }: { event: AgentEvent }) {
       : result.exit_code !== undefined
         ? `exit ${result.exit_code}`
         : '';
-  return <div className={`tool-result-row ${ok ? 'ok' : 'failed'}`}><span>{ok ? '✓' : '×'}</span><div><b>{ok ? '执行成功' : '执行失败'} · {event.tool}</b><small>{detail}</small>{result.next_action && <small className="tool-guidance">建议：{String(result.next_action)}</small>}{output && <pre>{compact(output, 1600)}</pre>}</div></div>;
+  const actual = result.actual_evidence as { id?: string; tool?: string } | undefined;
+  const candidates = Array.isArray(result.candidate_evidence) ? result.candidate_evidence as Array<{ id: string; tool: string; summary?: string; valid?: boolean; reason?: string }> : [];
+  return <div className={`tool-result-row ${ok ? 'ok' : 'failed'}`}><span>{ok ? '✓' : '×'}</span><div><b>{ok ? '执行成功' : '执行失败'} · {event.tool}</b><small>{detail}</small>{actual && <small className="tool-actual-evidence">实际证据：{actual.id} · {actual.tool}</small>}{candidates.length > 0 && <div className="evidence-candidates"><b>可用候选证据</b>{candidates.map((candidate) => <small key={candidate.id} className={candidate.valid === false ? 'invalid' : ''}><code>{candidate.id}</code> · {candidate.tool}{candidate.summary ? ` · ${compact(candidate.summary, 90)}` : ''}{candidate.reason ? `（${candidate.reason}）` : ''}</small>)}</div>}{result.next_action && <small className="tool-guidance">建议：{String(result.next_action)}</small>}{output && <pre>{compact(output, 1600)}</pre>}</div></div>;
+}
+
+function EngineeringQuestionCard({ question, active, running, onAnswer }: { question: EngineeringQuestion; active: boolean; running: boolean; onAnswer: (question: EngineeringQuestion, option: EngineeringOption, answer?: string) => Promise<void> }) {
+  const [selected, setSelected] = useState('');
+  const [answer, setAnswer] = useState('');
+  const selectedOption = question.options.find((option) => option.id === selected);
+  return <article className={`engineering-question ${active ? 'active' : 'resolved'}`}>
+    <p className="eyebrow">ENGINEERING DECISION</p><h3>{question.question}</h3><p>{question.reason}</p>
+    {question.baseline_review && <EngineeringBaselineReviewPanel review={question.baseline_review} />}
+    {question.review_summary && <EngineeringReviewSummary review={question.review_summary} />}
+    {question.workspace_review && <div className="workspace-review"><b>当前已验收项目：{question.workspace_review.project_title}</b><small>{question.workspace_review.requirements} 项需求 · {question.workspace_review.workspace}</small><p>{question.workspace_review.warning}</p></div>}
+    <div className="engineering-options">{question.options.map((option) => option.requires_input ? <button type="button" key={option.id} className={selected === option.id ? 'selected' : ''} disabled={!active || running} onClick={() => { setSelected(option.id); setAnswer(''); }}><b>{option.label}</b>{option.description && <small>{option.description}</small>}</button> : <button type="button" key={option.id} disabled={!active || running} onClick={() => onAnswer(question, option)}><b>{option.label}</b>{option.description && <small>{option.description}</small>}</button>)}</div>
+    {active && selectedOption?.requires_input && <div className="engineering-free-text"><label htmlFor={`decision-${question.question_id}`}>请补充具体修改内容</label><textarea id={`decision-${question.question_id}`} value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder={selectedOption.input_placeholder || '请描述要修改的需求、验收标准或决策'} rows={3} disabled={running} /><button type="button" disabled={running || !answer.trim()} onClick={() => onAnswer(question, selectedOption, answer)}>提交“{selectedOption.label}”并继续</button></div>}
+    {!active && <small className="question-resolved">该决策已记录</small>}
+  </article>;
 }
 
 function EngineeringReviewSummary({ review }: { review: EngineeringReview }) {
@@ -920,7 +944,7 @@ function compact(value: string, limit: number) { const normalized = value.replac
 function formatChars(value: number) { if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m chars`; if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k chars`; return `${value} chars`; }
 function planStatusLabel(status: PlanStep['status']) { return ({ pending: '等待执行', in_progress: '正在执行', completed: '证据已确认', blocked: '任务被阻塞' })[status]; }
 function blockerTypeLabel(type?: PlanStep['blocker_type']) { return ({ tool_failure: '工具执行失败', missing_prerequisite: '缺少前置条件', environment: '环境限制', user_input_required: '等待用户输入' } as Record<string, string>)[type || ''] || '任务被阻塞'; }
-function finalStatus(reason?: string) { if (reason === 'completed') return { icon: '✓', title: '完成', meta: '任务完成' }; if (reason === 'awaiting_user') return { icon: '?', title: '等待你的工程决策', meta: '等待确认' }; if (reason === 'blocked') return { icon: '!', title: '任务被阻塞', meta: '需要处理' }; if (reason === 'incomplete_plan') return { icon: '!', title: '计划未完成', meta: '未完成' }; return { icon: '■', title: '任务已停止', meta: '已停止' }; }
+function finalStatus(reason?: string) { if (reason === 'completed') return { icon: '✓', title: '完成', meta: '任务完成' }; if (reason === 'awaiting_user') return { icon: '?', title: '等待你的工程决策', meta: '等待确认' }; if (reason === 'checkpoint') return { icon: '↻', title: '到达工程检查点', meta: '可继续' }; if (reason === 'blocked') return { icon: '!', title: '任务被阻塞', meta: '需要处理' }; if (reason === 'incomplete_plan') return { icon: '!', title: '计划未完成', meta: '未完成' }; return { icon: '■', title: '任务已停止', meta: '已停止' }; }
 
 function MarkdownText({ text }: { text: string }) {
   const lines = text.replace(/\r\n/g, '\n').split('\n');

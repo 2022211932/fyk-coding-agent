@@ -77,7 +77,9 @@ class EngineeringWorkflowTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in baseline["requirements"]], ["FR-001", "NFR-001"])
         self.assertEqual(baseline["requirements"][0]["acceptance_criteria"], REQUIREMENTS[0]["acceptance_criteria"])
         self.assertEqual(len(baseline["digest"]), 64)
-        self.workflow.answer_question("baseline-1", option_id="revise")
+        self.workflow.answer_question(
+            "baseline-1", option_id="revise", answer="补充登录失败时的错误码要求"
+        )
         rejected = self.workflow.update(
             {"action": "advance_phase", "target_phase": "design"}, {}
         )
@@ -140,14 +142,18 @@ class EngineeringWorkflowTests(unittest.TestCase):
         )
         self.workflow.update({"action": "advance_phase", "target_phase": "implementation"}, {})
         bad = Evidence("read-1", "read_file", True, "read main.py", 1)
+        candidate = Evidence("edit-candidate", "edit_file", True, "edited candidate.py", 1)
         result = self.workflow.update(
             {
                 "action": "link_implementation",
                 "links": [{"requirement_id": "FR-001", "path": "main.py", "evidence_id": "read-1"}],
             },
-            {"read-1": bad},
+            {"read-1": bad, "edit-candidate": candidate},
         )
         self.assertFalse(result["ok"])
+        self.assertEqual(result["actual_evidence"]["tool"], "read_file")
+        self.assertIn("actual type read_file", result["error"])
+        self.assertEqual(result["candidate_evidence"][0]["id"], "edit-candidate")
 
         change = Evidence("edit-1", "edit_file", True, "edited main.py", 2)
         linked = self.workflow.update(
@@ -297,6 +303,97 @@ class EngineeringWorkflowTests(unittest.TestCase):
         stale = EngineeringWorkflow(self.root).payload()
         self.assertEqual(stale["phase"], "verification")
         self.assertFalse(next(item for item in stale["phases"] if item["id"] == "verification")["gate"]["passed"])
+
+    def test_revision_choice_requires_free_text(self) -> None:
+        self.workflow.update({"action": "define_requirements", "requirements": REQUIREMENTS}, {})
+        requested = self.workflow.request_user_input(
+            {
+                "question_id": "baseline-free-text",
+                "decision_key": "requirements_baseline",
+                "question": "确认需求？",
+                "reason": "进入设计。",
+                "options": [
+                    {"id": "approve", "label": "确认"},
+                    {"id": "revise", "label": "需要修改"},
+                ],
+            }
+        )
+        revise = next(item for item in requested["question"]["options"] if item["id"] == "revise")
+        self.assertTrue(revise["requires_input"])
+        with self.assertRaisesRegex(EngineeringError, "free-text"):
+            self.workflow.answer_question("baseline-free-text", option_id="revise")
+        answered = self.workflow.answer_question(
+            "baseline-free-text", option_id="revise", answer="增加审计日志要求"
+        )
+        self.assertEqual(answered["decision"]["answer"], "增加审计日志要求")
+
+    def test_completed_project_requires_replacement_decision_before_rollback(self) -> None:
+        self.workflow._state["phase"] = "acceptance"
+        self.workflow._state["status"] = "completed"
+        self.workflow._state["project_title"] = "旧项目"
+        blocked = self.workflow.update(
+            {"action": "advance_phase", "target_phase": "requirements"}, {}
+        )
+        self.assertFalse(blocked["ok"])
+        self.assertIn("completed_project_change", blocked["error"])
+
+        requested = self.workflow.request_user_input(
+            {
+                "question_id": "replace-project",
+                "decision_key": "completed_project_change",
+                "question": "如何处理当前已验收项目？",
+                "reason": "新请求可能替换现有项目。",
+                "options": [
+                    {"id": "modify_current", "label": "修改当前项目"},
+                    {"id": "replace_current", "label": "替换当前项目"},
+                    {"id": "new_workspace", "label": "使用新工作区"},
+                ],
+            }
+        )
+        self.assertEqual(requested["question"]["workspace_review"]["project_title"], "旧项目")
+        self.workflow.answer_question("replace-project", option_id="replace_current")
+        rolled_back = self.workflow.update(
+            {"action": "advance_phase", "target_phase": "requirements"}, {}
+        )
+        self.assertTrue(rolled_back["ok"])
+
+    def test_new_workspace_decision_cannot_replace_completed_project(self) -> None:
+        self.workflow._state["phase"] = "acceptance"
+        self.workflow._state["status"] = "completed"
+        self.workflow.request_user_input(
+            {
+                "question_id": "keep-project",
+                "decision_key": "completed_project_change",
+                "question": "如何处理当前项目？",
+                "reason": "避免覆盖。",
+                "options": [
+                    {"id": "modify_current", "label": "修改当前项目"},
+                    {"id": "replace_current", "label": "替换当前项目"},
+                    {"id": "new_workspace", "label": "使用新工作区"},
+                ],
+            }
+        )
+        self.workflow.answer_question("keep-project", option_id="new_workspace")
+        result = self.workflow.update(
+            {"action": "advance_phase", "target_phase": "requirements"}, {}
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(self.workflow.payload()["status"], "completed")
+
+    def test_documented_test_count_must_match_latest_successful_run(self) -> None:
+        docs = self.root / "docs"
+        docs.mkdir()
+        (docs / "TESTING.md").write_text("当前 17 个测试全部通过。\n", encoding="utf-8")
+        evidence = Evidence(
+            "tests-20", "run_command", True, "python -m unittest · exit 0", 1, verification=True
+        )
+        self.workflow.record_evidence(
+            evidence,
+            {"command": "python -m unittest"},
+            {"ok": True, "exit_code": 0, "stdout": "Ran 20 tests in 0.2s\nOK"},
+        )
+        missing = self.workflow._documentation_consistency_missing()
+        self.assertTrue(any("声明 [17]，实际 20" in item for item in missing))
 
 
 if __name__ == "__main__":

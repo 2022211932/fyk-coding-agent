@@ -226,6 +226,25 @@ class WebConsoleTests(unittest.TestCase):
         self.assertGreater(session["context_chars"], 0)
         self.assertEqual(session["context_compactions"], 1)
 
+    def test_session_storage_strips_reasoning_and_coalesces_state_events(self) -> None:
+        self.state.append_session_event("compact", {"type": "context_stats", "context_chars": 10})
+        self.state.append_session_event("compact", {"type": "context_stats", "context_chars": 20})
+        self.state.append_session_event("compact", {"type": "engineering_state", "engineering": {"phase": "design"}})
+        self.state.append_session_event("compact", {"type": "engineering_state", "engineering": {"phase": "implementation"}})
+        self.state.save_session_history(
+            "compact",
+            [
+                {"role": "system", "content": "system"},
+                {"role": "assistant", "content": "done", "reasoning_content": "hidden" * 100},
+            ],
+            context_compactions=1,
+        )
+        session = self.state.session("compact")
+        self.assertEqual([item["type"] for item in session.events].count("context_stats"), 1)
+        self.assertEqual([item["type"] for item in session.events].count("engineering_state"), 1)
+        self.assertNotIn("reasoning_content", session.history[-1])
+        self.assertEqual(session.events[-1]["engineering"]["phase"], "implementation")
+
     def test_running_session_can_be_stopped(self) -> None:
         session = self.state.session("busy")
         session.running = True

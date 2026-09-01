@@ -26,7 +26,20 @@ class ContextManagerTests(unittest.TestCase):
         manager = ContextManager(max_chars=1000)
         self.assertIs(manager.compact(messages), messages)
 
+    def test_compaction_starts_before_the_hard_limit_and_drops_old_reasoning(self) -> None:
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": None, "reasoning_content": "r" * 500},
+            {"role": "tool", "tool_call_id": "old", "content": "x" * 200},
+            {"role": "assistant", "content": "latest"},
+        ]
+        manager = ContextManager(max_chars=1000)
+        compacted = manager.compact(messages)
+        self.assertEqual(manager.trigger_chars, 650)
+        self.assertEqual(manager.compactions, 1)
+        self.assertFalse(any("reasoning_content" in message for message in compacted[:-1]))
+
 
 if __name__ == "__main__":
     unittest.main()
-

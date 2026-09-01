@@ -11,34 +11,53 @@ def message_size(message: dict[str, Any]) -> int:
 class ContextManager:
     """Keeps protocol-valid recent turns under a character budget."""
 
-    def __init__(self, max_chars: int):
+    def __init__(
+        self,
+        max_chars: int,
+        *,
+        trigger_ratio: float = 0.65,
+        target_ratio: float = 0.45,
+    ):
         self.max_chars = max_chars
+        self.trigger_chars = max(1, int(max_chars * trigger_ratio))
+        self.target_chars = max(1, int(max_chars * target_ratio))
         self.compactions = 0
 
     def compact(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if sum(map(message_size, messages)) <= self.max_chars or len(messages) <= 3:
+        if sum(map(message_size, messages)) <= self.trigger_chars or len(messages) <= 3:
             return messages
 
         fixed = messages[:2]
         blocks = _conversation_blocks(messages[2:])
+        stripped_reasoning = 0
+        normalized_blocks: list[list[dict[str, Any]]] = []
+        for index, block in enumerate(blocks):
+            normalized: list[dict[str, Any]] = []
+            for source in block:
+                message = dict(source)
+                if index < len(blocks) - 1 and message.pop("reasoning_content", None):
+                    stripped_reasoning += 1
+                normalized.append(message)
+            normalized_blocks.append(normalized)
         kept: list[list[dict[str, Any]]] = []
         used = sum(map(message_size, fixed))
         reserve = 600
-        for block in reversed(blocks):
+        for block in reversed(normalized_blocks):
             block_size = sum(map(message_size, block))
-            if kept and used + block_size + reserve > self.max_chars:
+            if kept and used + block_size + reserve > self.target_chars:
                 break
             kept.append(block)
             used += block_size
         kept.reverse()
         removed = len(blocks) - len(kept)
-        if removed <= 0:
+        if removed <= 0 and stripped_reasoning <= 0:
             return messages
         self.compactions += 1
         notice = {
             "role": "system",
             "content": (
-                f"Context manager removed {removed} older interaction block(s). "
+                f"Context manager removed {removed} older interaction block(s) and "
+                f"discarded hidden reasoning from {stripped_reasoning} older assistant message(s). "
                 "The original task remains above. Re-read files when exact prior output is needed."
             ),
         }
@@ -61,4 +80,3 @@ def _conversation_blocks(messages: list[dict[str, Any]]) -> list[list[dict[str, 
     if current:
         blocks.append(current)
     return blocks
-

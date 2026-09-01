@@ -126,6 +126,16 @@ class TerminalUI:
                 answer = ""
             if answer.isdigit() and 1 <= int(answer) <= len(options):
                 selected = options[int(answer) - 1]
+                if selected.get("requires_input"):
+                    placeholder = selected.get("input_placeholder") or "Describe the requested changes"
+                    while True:
+                        try:
+                            detail = input(self.paint(f"  {placeholder}: ", BLUE)).strip()
+                        except EOFError:
+                            detail = ""
+                        if detail:
+                            return str(selected["id"]), detail
+                        self.error("This choice requires a concrete explanation.")
                 return str(selected["id"]), str(selected.get("label", selected["id"]))
             self.error("Please enter one of the listed option numbers.")
 

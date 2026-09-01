@@ -56,7 +56,16 @@ SKILLS = (
 
 
 class EngineeringError(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        candidates: list[dict[str, Any]] | None = None,
+        next_action: str = "",
+    ):
+        super().__init__(message)
+        self.candidates = candidates or []
+        self.next_action = next_action
 
 
 class EngineeringWorkflow:
@@ -219,6 +228,11 @@ class EngineeringWorkflow:
                                 "id": {"type": "string"},
                                 "label": {"type": "string"},
                                 "description": {"type": "string"},
+                                "requires_input": {
+                                    "type": "boolean",
+                                    "description": "Require the user to explain this choice in free text.",
+                                },
+                                "input_placeholder": {"type": "string", "maxLength": 160},
                             },
                             "required": ["id", "label"],
                             "additionalProperties": False,
@@ -247,6 +261,34 @@ class EngineeringWorkflow:
     def is_completed(self) -> bool:
         with self._lock:
             return self._state["status"] == "completed"
+
+    @property
+    def phase(self) -> str:
+        with self._lock:
+            return str(self._state["phase"])
+
+    def tool_snapshot(self) -> dict[str, Any]:
+        """Small model-facing state; the UI can still request the full payload."""
+        with self._lock:
+            gate = self._gate(self._state["phase"])
+            return {
+                "phase": self._state["phase"],
+                "status": self._state["status"],
+                "project_title": self._state["project_title"],
+                "counts": {
+                    "requirements": len(self._state["requirements"]),
+                    "modules": len(self._state["design_modules"]),
+                    "implementation_links": len(self._state["implementation_links"]),
+                    "test_links": len(self._state["test_links"]),
+                    "evidence": len(self._state.get("evidence", [])),
+                },
+                "gate": gate,
+                "pending_question_id": (
+                    (self._state.get("pending_question") or {}).get("question_id")
+                    if isinstance(self._state.get("pending_question"), dict)
+                    else None
+                ),
+            }
 
     def evidence_records(self) -> dict[str, Evidence]:
         with self._lock:
@@ -281,6 +323,7 @@ class EngineeringWorkflow:
                 "command": str(arguments.get("command", ""))[:1000],
                 "exit_code": result.get("exit_code"),
                 "file_hash": self._file_hash(path) if path and evidence.ok else "",
+                "test_count": _test_count(result) if evidence.ok else None,
             }
             existing = [
                 item for item in self._state.get("evidence", []) if item.get("id") != evidence.evidence_id
@@ -375,6 +418,11 @@ class EngineeringWorkflow:
             "it proves. Inspection evidence only comes from read_file, search_text, list_files, or "
             "get_environment; never label run_command as inspection. Record every material default in the "
             "assumptions field of define_requirements so it appears on the baseline review card. The engineering "
+            "workspace may be changed only during implementation. In verification, only recognized test, lint, "
+            "type-check, compile, dependency, or build commands are allowed. If project files or user documents "
+            "need changes, move back to implementation and refresh their evidence before testing again. When a "
+            "completed workspace receives a new project or change request, first ask for decision_key="
+            "completed_project_change with modify_current, replace_current, and new_workspace options. "
             "lifecycle remains authoritative even if older conversation history mentions update_plan. Never claim "
             "zero residual risk; describe the boundary of the verified baseline.\n"
             "Current engineering state:\n"
@@ -405,14 +453,16 @@ class EngineeringWorkflow:
                     raise EngineeringError(f"unknown engineering action: {action}")
                 self._state["updated_at"] = _now()
                 self._persist()
-                return {"ok": True, "engineering": self.payload()}
+                return {"ok": True, "engineering": self.tool_snapshot()}
             except EngineeringError as exc:
                 return {
                     "ok": False,
                     "error": str(exc),
                     "error_type": "engineering_gate_failed",
-                    "next_action": _next_action(str(exc), self._state["phase"]),
-                    "engineering": self.payload(),
+                    "next_action": exc.next_action or _next_action(str(exc), self._state["phase"]),
+                    "actual_evidence": _actual_evidence_from_error(str(exc)),
+                    "candidate_evidence": exc.candidates,
+                    "engineering": self.tool_snapshot(),
                 }
 
     def request_user_input(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -434,8 +484,15 @@ class EngineeringWorkflow:
                             "id": _identifier(raw.get("id"), "option id"),
                             "label": _text(raw.get("label"), "option label", 100),
                             "description": str(raw.get("description", "")).strip()[:300],
+                            "requires_input": bool(raw.get("requires_input", False)),
+                            "input_placeholder": str(raw.get("input_placeholder", "")).strip()[:160],
                         }
                     )
+                for option in options:
+                    option_id = option["id"].lower()
+                    if option_id in {"revise", "modify", "change", "needs_changes", "other"}:
+                        option["requires_input"] = True
+                        option["input_placeholder"] = option["input_placeholder"] or "请说明需要修改的内容"
                 if len({item["id"] for item in options}) != len(options):
                     raise EngineeringError("option IDs must be unique")
                 if decision_key in {"requirements_baseline", "project_acceptance"} and not any(
@@ -455,6 +512,17 @@ class EngineeringWorkflow:
                     raise EngineeringError(
                         "verification quality gate must pass before requesting project acceptance"
                     )
+                if decision_key == "completed_project_change":
+                    if not self.is_completed:
+                        raise EngineeringError(
+                            "completed_project_change is only valid for an accepted project"
+                        )
+                    required = {"modify_current", "replace_current", "new_workspace"}
+                    actual = {item["id"] for item in options}
+                    if not required.issubset(actual):
+                        raise EngineeringError(
+                            "completed_project_change options must include modify_current, replace_current, and new_workspace"
+                        )
                 affected = arguments.get("affected_requirement_ids", [])
                 if not isinstance(affected, list):
                     raise EngineeringError("affected_requirement_ids must be an array")
@@ -479,6 +547,13 @@ class EngineeringWorkflow:
                     }
                 if decision_key == "project_acceptance":
                     question_value["review_summary"] = self._review_summary()
+                if decision_key == "completed_project_change":
+                    question_value["workspace_review"] = {
+                        "project_title": self._state["project_title"] or "未命名项目",
+                        "requirements": len(self._state["requirements"]),
+                        "workspace": str(self.workspace),
+                        "warning": "替换当前项目可能删除或覆盖现有项目文件；建议为无关项目选择新的工作区。",
+                    }
                 self._state["pending_question"] = question_value
                 self._state["status"] = "awaiting_user"
                 self._state["updated_at"] = _now()
@@ -499,6 +574,11 @@ class EngineeringWorkflow:
             )
             if option is None:
                 raise EngineeringError("the selected option does not belong to this question")
+            normalized_answer = answer.strip()[:1000]
+            if option.get("requires_input") and (
+                not normalized_answer or normalized_answer == option.get("label")
+            ):
+                raise EngineeringError("this choice requires a free-text explanation")
             if (
                 pending.get("decision_key") == "requirements_baseline"
                 and option_id.lower() in APPROVAL_OPTION_IDS
@@ -512,7 +592,7 @@ class EngineeringWorkflow:
                 "question_id": question_id,
                 "option_id": option_id,
                 "option_label": option["label"],
-                "answer": answer.strip()[:1000],
+                "answer": normalized_answer,
                 "baseline_digest": pending.get("baseline_review", {}).get("digest", ""),
                 "decided_at": _now(),
             }
@@ -520,7 +600,9 @@ class EngineeringWorkflow:
                 item for item in self._state["decisions"] if item.get("key") != decision["key"]
             ] + [decision]
             self._state["pending_question"] = None
-            self._state["status"] = "active"
+            self._state["status"] = (
+                "completed" if decision["key"] == "completed_project_change" else "active"
+            )
             if decision["key"] == "requirements_baseline" and _is_approved(decision):
                 gate = self._gate("requirements")
                 if gate["passed"]:
@@ -675,26 +757,42 @@ class EngineeringWorkflow:
             evidence_id = str(raw.get("evidence_id", ""))
             record = evidence.get(evidence_id)
             if record is None:
-                raise EngineeringError(f"unknown evidence ID: {evidence_id}")
+                raise EngineeringError(
+                    f"unknown evidence ID: {evidence_id}",
+                    candidates=self._evidence_candidates(evidence, implementation=implementation),
+                )
             if not record.ok:
-                raise EngineeringError(f"evidence {evidence_id} did not succeed")
+                raise EngineeringError(
+                    f"evidence {evidence_id} has actual type {record.tool} but did not succeed",
+                    candidates=self._evidence_candidates(evidence, implementation=implementation),
+                )
             if implementation:
                 if record.tool not in {"write_file", "edit_file", "make_directory"}:
-                    raise EngineeringError(f"implementation evidence {evidence_id} must be a successful change tool")
+                    raise EngineeringError(
+                        f"implementation evidence {evidence_id} has actual type {record.tool}; "
+                        "expected write_file, edit_file, or make_directory",
+                        candidates=self._evidence_candidates(evidence, implementation=True),
+                    )
                 if not record.changed:
                     raise EngineeringError(
-                        f"implementation evidence {evidence_id} did not change the workspace; reuse the original change evidence"
+                        f"implementation evidence {evidence_id} has actual type {record.tool} but did not change "
+                        "the workspace; reuse the original change evidence",
+                        candidates=self._evidence_candidates(evidence, implementation=True),
                     )
                 path = _text(raw.get("path"), "implementation path", 500)
                 metadata = self._evidence_metadata(evidence_id)
                 if metadata:
                     if metadata.get("path") and metadata.get("path") != path:
                         raise EngineeringError(
-                            f"implementation evidence {evidence_id} belongs to {metadata.get('path')}, not {path}"
+                            f"implementation evidence {evidence_id} has actual type {record.tool} and belongs "
+                            f"to {metadata.get('path')}, not {path}",
+                            candidates=self._evidence_candidates(evidence, implementation=True),
                         )
                     if metadata.get("file_hash") != self._file_hash(path):
                         raise EngineeringError(
-                            f"implementation evidence {evidence_id} is stale because {path} changed afterward"
+                            f"implementation evidence {evidence_id} has actual type {record.tool} and is stale "
+                            f"because {path} changed afterward",
+                            candidates=self._evidence_candidates(evidence, implementation=True),
                         )
                 parsed.append({"requirement_id": requirement_id, "path": path, "evidence_id": evidence_id})
             else:
@@ -720,11 +818,15 @@ class EngineeringWorkflow:
                     )
                 if evidence_kind in {"unit_test", "integration_test"} and not record.verification:
                     raise EngineeringError(
-                        f"{evidence_kind} evidence {evidence_id} must be a successful verification command"
+                        f"{evidence_kind} evidence {evidence_id} has actual type {record.tool}; expected a "
+                        "successful verification command",
+                        candidates=self._evidence_candidates(evidence, implementation=False),
                     )
                 if evidence_kind in {"performance_test", "security_test"} and not record.verification:
                     raise EngineeringError(
-                        f"{evidence_kind} evidence {evidence_id} must be a successful verification command"
+                        f"{evidence_kind} evidence {evidence_id} has actual type {record.tool}; expected a "
+                        "successful verification command",
+                        candidates=self._evidence_candidates(evidence, implementation=False),
                     )
                 if evidence_kind == "static_analysis" and (
                     record.tool != "run_command"
@@ -735,7 +837,9 @@ class EngineeringWorkflow:
                     )
                 ):
                     raise EngineeringError(
-                        f"static_analysis evidence {evidence_id} must come from a successful lint, type, compile, dependency, or security check"
+                        f"static_analysis evidence {evidence_id} has actual type {record.tool}; expected a successful "
+                        "lint, type, compile, dependency, or security check",
+                        candidates=self._evidence_candidates(evidence, implementation=False),
                     )
                 if evidence_kind == "inspection" and record.tool not in {
                     "read_file",
@@ -744,7 +848,9 @@ class EngineeringWorkflow:
                     "get_environment",
                 }:
                     raise EngineeringError(
-                        f"inspection evidence {evidence_id} must come from a successful inspection tool"
+                        f"inspection evidence {evidence_id} has actual type {record.tool}; expected read_file, "
+                        "search_text, list_files, or get_environment",
+                        candidates=self._evidence_candidates(evidence, implementation=False),
                     )
                 claim = _text(raw.get("claim"), "verification claim", 500)
                 raw_indices = raw.get("criterion_indices")
@@ -780,6 +886,45 @@ class EngineeringWorkflow:
         for item in parsed:
             existing[(item["requirement_id"], item.get("path") or item.get("command"))] = item
         self._state[key] = list(existing.values())
+
+    def _evidence_candidates(
+        self, evidence: Mapping[str, Evidence], *, implementation: bool
+    ) -> list[dict[str, Any]]:
+        allowed = (
+            {"write_file", "edit_file", "make_directory"}
+            if implementation
+            else {
+                "run_command",
+                "read_file",
+                "search_text",
+                "list_files",
+                "get_environment",
+            }
+        )
+        candidates: list[dict[str, Any]] = []
+        for evidence_id, record in reversed(list(evidence.items())):
+            if not record.ok or record.tool not in allowed:
+                continue
+            metadata = self._evidence_metadata(evidence_id) or {}
+            path = str(metadata.get("path", ""))
+            stale = bool(
+                implementation
+                and path
+                and metadata.get("file_hash") != self._file_hash(path)
+            )
+            candidates.append(
+                {
+                    "id": evidence_id,
+                    "tool": record.tool,
+                    "summary": record.summary,
+                    "path": path,
+                    "valid": not stale and (record.changed if implementation else True),
+                    "reason": "file changed after this evidence" if stale else "compatible evidence type",
+                }
+            )
+            if len(candidates) >= 8:
+                break
+        return candidates
 
     def _implementation_fingerprint(self) -> str:
         paths = sorted(
@@ -850,6 +995,30 @@ class EngineeringWorkflow:
             raise EngineeringError("target_phase is required")
         current_index = PHASES.index(self._state["phase"])
         target_index = PHASES.index(target)
+        if self._state["status"] == "completed" and target_index < current_index:
+            decision = next(
+                (
+                    item
+                    for item in reversed(self._state["decisions"])
+                    if item.get("key") == "completed_project_change"
+                ),
+                None,
+            )
+            if decision is None:
+                raise EngineeringError(
+                    "completed project replacement requires a completed_project_change user decision"
+                )
+            choice = decision.get("option_id")
+            if choice == "new_workspace":
+                raise EngineeringError(
+                    "the user chose a new workspace; select another local project instead of replacing this one"
+                )
+            if choice == "replace_current" and target != "requirements":
+                raise EngineeringError(
+                    "replace_current must restart from the requirements phase"
+                )
+            if choice not in {"modify_current", "replace_current"}:
+                raise EngineeringError("completed_project_change decision is not actionable")
         if target_index > current_index + 1:
             raise EngineeringError("engineering phases cannot be skipped")
         if target_index > current_index:
@@ -943,12 +1112,69 @@ class EngineeringWorkflow:
                 if uncovered:
                     labels = ", ".join(str(index) for index in sorted(uncovered))
                     missing.append(f"{requirement['id']} 缺少或已过期的验收标准证据：{labels}")
+            missing.extend(self._documentation_consistency_missing())
         elif phase == "acceptance":
             verification = self._gate("verification")
             missing.extend(verification["missing"])
             if not _is_approved(decisions.get("project_acceptance")):
                 missing.append("用户完成项目验收")
         return {"passed": not missing, "missing": missing}
+
+    def _documentation_consistency_missing(self) -> list[str]:
+        docs_directory = self.workspace / "docs"
+        if not docs_directory.is_dir():
+            return []
+        documents = sorted(docs_directory.rglob("*.md"))
+        verification_documents = [
+            path
+            for path in documents
+            if re.search(
+                r"(?:test|verification|quality|report|trace|readme|测试|验证|质量|报告|追踪)",
+                path.name,
+                flags=re.IGNORECASE,
+            )
+        ]
+        if not verification_documents:
+            return []
+        evidence_records = self._state.get("evidence", [])
+        implementation_times = [
+            _parse_time(item.get("timestamp"))
+            for item in evidence_records
+            if item.get("ok")
+            and item.get("tool") in {"write_file", "edit_file", "make_directory"}
+            and item.get("path")
+            and not str(item.get("path")).replace("\\", "/").startswith("docs/")
+        ]
+        latest_change = max((value for value in implementation_times if value), default=None)
+        missing: list[str] = []
+        if latest_change is not None:
+            stale = [
+                str(path.relative_to(self.workspace)).replace("\\", "/")
+                for path in verification_documents
+                if datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) < latest_change
+            ]
+            if stale:
+                missing.append("用户文档早于最新代码/测试修改，请更新：" + ", ".join(stale[:5]))
+
+        successful_counts = [
+            int(item["test_count"])
+            for item in evidence_records
+            if item.get("ok") and isinstance(item.get("test_count"), int)
+        ]
+        if successful_counts:
+            actual = max(successful_counts)
+            mismatches: list[str] = []
+            for path in verification_documents:
+                try:
+                    claimed = _document_test_counts(path.read_text(encoding="utf-8"))
+                except OSError:
+                    continue
+                if claimed and any(value != actual for value in claimed):
+                    relative = str(path.relative_to(self.workspace)).replace("\\", "/")
+                    mismatches.append(f"{relative} 声明 {sorted(claimed)}，实际 {actual}")
+            if mismatches:
+                missing.append("文档测试数量与最近成功测试不一致：" + "；".join(mismatches[:5]))
+        return missing
 
     def _load(self) -> dict[str, Any]:
         try:
@@ -1077,6 +1303,45 @@ def _is_approved(decision: dict[str, Any] | None) -> bool:
     return bool(decision and str(decision.get("option_id", "")).lower() in APPROVAL_OPTION_IDS)
 
 
+def _test_count(result: dict[str, Any]) -> int | None:
+    output = f"{result.get('stdout', '')}\n{result.get('stderr', '')}"
+    matches = re.findall(r"\bRan\s+(\d+)\s+tests?\b", output, flags=re.IGNORECASE)
+    if not matches:
+        matches = re.findall(
+            r"\b(\d+)\s+(?:tests?|passed)\b", output, flags=re.IGNORECASE
+        )
+    return int(matches[-1]) if matches else None
+
+
+def _document_test_counts(text: str) -> set[int]:
+    patterns = (
+        r"\bRan\s+(\d+)\s+tests?\b",
+        r"(\d+)\s*个测试(?:全部)?通过",
+        r"(?:共|总计|通过)\s*(\d+)\s*(?:个|项)?测试",
+    )
+    return {
+        int(match)
+        for pattern in patterns
+        for match in re.findall(pattern, text, flags=re.IGNORECASE)
+    }
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _actual_evidence_from_error(error: str) -> dict[str, str] | None:
+    match = re.search(r"evidence\s+(\S+)\s+has actual type\s+(\S+)", error)
+    if not match:
+        return None
+    return {"id": match.group(1).rstrip(";"), "tool": match.group(2).rstrip(";")}
+
+
 def _next_action(error: str, phase: str) -> str:
     if "FR-001 or NFR-001" in error:
         return "Retry define_requirements with IDs like FR-001 and NFR-001 matching requirement kind."
@@ -1086,6 +1351,10 @@ def _next_action(error: str, phase: str) -> str:
         return "Retry link_tests with evidence_kind, claim, and 1-based criterion_indices for each requirement."
     if "inspection evidence" in error:
         return "Run read_file, search_text, list_files, or get_environment, then link that evidence as inspection."
+    if "actual type" in error or "unknown evidence ID" in error:
+        return "Choose a compatible candidate_evidence entry, or run the required tool and use its returned evidence_id."
+    if "completed_project_change" in error:
+        return "Ask the user whether to modify this project, replace it, or select a new workspace before rollback."
     if "successful verification command" in error:
         return "Run the relevant test command successfully, then link its evidence with the matching test evidence_kind."
     if "move to the" in error:

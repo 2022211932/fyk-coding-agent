@@ -26,6 +26,7 @@ class Settings:
     base_url: str
     model: str
     max_steps: int = 30
+    engineering_max_steps: int = 60
     max_context_chars: int = 120_000
     request_timeout: int = 120
     max_retries: int = 3
@@ -44,6 +45,7 @@ class Settings:
             base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/"),
             model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"),
             max_steps=_positive_int("YUKAI_MAX_STEPS", 30, "FYK_AGENT_MAX_STEPS"),
+            engineering_max_steps=_positive_int("YUKAI_ENGINEERING_MAX_STEPS", 60),
             max_context_chars=_positive_int(
                 "YUKAI_MAX_CONTEXT_CHARS", 800_000, "FYK_AGENT_MAX_CONTEXT_CHARS"
             ),

@@ -98,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     agent = CodingAgent(
         OpenAICompatibleClient(settings),
         registry,
-        max_steps=settings.max_steps,
+        max_steps=settings.engineering_max_steps if args.engineering else settings.max_steps,
         max_context_chars=settings.max_context_chars,
         notify=lambda kind, data: _terminal_notification(ui, kind, data),
         engineering=engineering,
@@ -255,6 +255,7 @@ def _replace_setting(settings: Settings, **changes: Any) -> Settings:
         "base_url": settings.base_url,
         "model": settings.model,
         "max_steps": settings.max_steps,
+        "engineering_max_steps": settings.engineering_max_steps,
         "max_context_chars": settings.max_context_chars,
         "request_timeout": settings.request_timeout,
         "max_retries": settings.max_retries,

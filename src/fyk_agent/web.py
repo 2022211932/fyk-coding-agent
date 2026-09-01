@@ -146,6 +146,10 @@ class WebAgentState:
                 session = self.sessions.setdefault(session_id, WebSession())
                 record = dict(event)
                 record.setdefault("timestamp", time.strftime("%H:%M:%S"))
+                if record.get("type") in {"context_stats", "engineering_state"}:
+                    session.events = [
+                        item for item in session.events if item.get("type") != record.get("type")
+                    ]
                 session.events.append(record)
                 session.events = session.events[-2000:]
                 session.updated_at = time.time() * 1000
@@ -161,7 +165,10 @@ class WebAgentState:
         with self.state_lock:
             with self.sessions_lock:
                 session = self.sessions.setdefault(session_id, WebSession())
-                session.history = history
+                session.history = [
+                    {key: value for key, value in message.items() if key != "reasoning_content"}
+                    for message in history
+                ]
                 session.context_compactions = context_compactions
                 session.updated_at = time.time() * 1000
                 self._persist_sessions_locked()
@@ -240,6 +247,8 @@ class WebAgentState:
                 "workspace": str(self.workspace.root),
                 "automatic_approval": self.automatic_approval,
                 "max_context_chars": self.settings.max_context_chars,
+                "max_steps": self.settings.max_steps,
+                "engineering_max_steps": self.settings.engineering_max_steps,
                 "engineering": self.engineering.payload(),
             }
 
@@ -424,7 +433,7 @@ def run_web_console(
 
 def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "YukaiWeb/0.3.2"
+        server_version = "YukaiWeb/0.3.3"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return
@@ -680,7 +689,11 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
             agent = CodingAgent(
                 OpenAICompatibleClient(state.settings),
                 registry,
-                max_steps=state.settings.max_steps,
+                max_steps=(
+                    state.settings.engineering_max_steps
+                    if engineering_mode
+                    else state.settings.max_steps
+                ),
                 max_context_chars=state.settings.max_context_chars,
                 notify=emit,
                 cancelled=session.cancel_event.is_set,
@@ -695,6 +708,7 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                     result.messages,
                     context_compactions=result.context_compactions,
                 )
+                stored_history = session.history or []
                 emit(
                     "final",
                     {
@@ -703,8 +717,8 @@ def _handler_factory(state: WebAgentState) -> type[BaseHTTPRequestHandler]:
                         "stop_reason": result.stop_reason,
                         "compactions": result.context_compactions,
                         "context_compactions": session.context_compactions,
-                        "context_chars": sum(message_size(message) for message in result.messages),
-                        "message_count": len(result.messages),
+                        "context_chars": sum(message_size(message) for message in stored_history),
+                        "message_count": len(stored_history),
                     },
                 )
             except (ModelError, ValueError, RuntimeError) as exc:

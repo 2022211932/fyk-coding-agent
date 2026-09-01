@@ -438,6 +438,37 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("剩余风险", result.final_text)
         self.assertIn("skipped_project_completed", result.messages[-1]["content"])
 
+    def test_engineering_phase_blocks_file_changes_outside_implementation(self) -> None:
+        client = FakeClient(
+            [
+                named_tool_reply(
+                    "write_file",
+                    {"path": "too-early.py", "content": "value = 1\n"},
+                    "early-write",
+                ),
+                AssistantReply("已按阶段约束停止写入。", [], {"role": "assistant", "content": "已按阶段约束停止写入。"}),
+            ]
+        )
+        result = CodingAgent(
+            client,
+            self.registry,
+            engineering=EngineeringWorkflow(self.registry.workspace.root),
+        ).run("先写代码")
+        self.assertEqual(result.stop_reason, "completed")
+        self.assertFalse((self.registry.workspace.root / "too-early.py").exists())
+        self.assertIn("engineering_phase_read_only", client.requests[1][-1]["content"])
+
+    def test_engineering_step_limit_is_a_resumable_checkpoint(self) -> None:
+        client = FakeClient([tool_reply(), tool_reply()])
+        result = CodingAgent(
+            client,
+            self.registry,
+            max_steps=2,
+            engineering=EngineeringWorkflow(self.registry.workspace.root),
+        ).run("持续检查")
+        self.assertEqual(result.stop_reason, "checkpoint")
+        self.assertIn("继续任务", result.final_text)
+
 
 if __name__ == "__main__":
     unittest.main()
