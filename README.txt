@@ -1,11 +1,11 @@
-Yukai — A Lightweight Autonomous Coding Agent
+Yukai——轻量级自主编程智能体
 
-Git仓库：https://github.com/2022211932/fyk-coding-agent
+Git仓库：https://github.com/2022211932/Yukai-A-Lightweight-Autonomous-Coding-Agent
 
-运行要求：Python 3.10+。执行“python -m venv .venv”，激活环境后运行“python -m pip install -e .”。将DeepSeek密钥写入环境变量DEEPSEEK_API_KEY，然后使用“yukai -w 项目目录 "编程任务"”；直接运行“yukai -w 项目目录”进入类似Claude Code的常驻命令行。可视化模式另需Node.js 22+，首次执行“cd web; npm install; cd ..”，以后运行“yukai --web”。点击顶部工作区路径可浏览本机并选择项目，程序会记住最近项目。旧命令“fyk-agent”仍可兼容使用。
+运行方法：需要Python 3.10+。执行“python -m venv .venv”，激活虚拟环境后运行“python -m pip install -e .”，通过环境变量DEEPSEEK_API_KEY提供密钥。执行“yukai -w 项目目录 "编程任务"”运行单次任务；执行“yukai -w 项目目录”进入常驻命令行。Web控制台另需Node.js 22+，首次在web目录运行“npm install”，以后执行“yukai --web”即可启动。
 
-本项目直接调用DeepSeek V4 Pro的OpenAI兼容tool calling接口，不使用任何Agent框架或服务端文件、代码执行工具。自行实现模型HTTP客户端、对话历史、上下文裁剪、工具协议解析、Agent循环、终止条件、错误重试和本地执行。
+项目直接调用DeepSeek的OpenAI兼容Chat Completions与原生tool calling接口，不使用Agent框架、SDK或服务端文件及代码执行工具。模型客户端、对话历史、上下文压缩、工具定义与本地执行、输出解析、循环终止、重试和错误处理均自行实现。
 
-特色功能：终端与Web控制台均实时展示模型步骤、工具调用和命令输出；所有路径限制在工作区内，拒绝访问.env、私钥和Git内部文件；写入与命令默认需要人工批准，Web界面可明确切换自动审批；文件写入前自动保存快照并支持撤销；命令带超时、输出截断并移除敏感环境变量；JSONL日志记录执行过程。控制台接口仅监听本机并用随机令牌鉴权。
+特色功能：支持自主浏览、搜索、精确编辑工作区文件以及执行测试和构建命令；复杂任务使用绑定真实工具结果的结构化计划，避免无证据地报告完成；Yukai-SE按需求、设计、实现、测试、验收五阶段工作，生成需求与设计文档和追踪矩阵，黑盒测试覆盖功能验收标准，白盒测试覆盖核心设计模块；关键需求和验收结论由用户确认。
 
-作者：冯逸康
+安全与交互：路径沙箱拒绝越界、敏感文件和Git内部数据；文件修改及命令支持分级审批，高风险操作必须单次确认，灾难性命令直接拦截；写前快照支持Diff和撤销；命令具有超时、输出截断、进程中止和敏感环境变量隔离；本地Web控制台支持流式执行记录、持久化会话、停止任务和审批，仅监听127.0.0.1并使用随机令牌鉴权。

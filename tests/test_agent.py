@@ -357,7 +357,32 @@ class AgentLoopTests(unittest.TestCase):
             "description": "返回问候文本。",
             "acceptance_criteria": ["调用 greet 返回 hello"],
         }
-        workflow.update({"action": "define_requirements", "requirements": [requirement]}, {})
+        workflow.update(
+            {
+                "action": "define_requirements",
+                "requirements": [requirement],
+                "actors": [
+                    {"id": "ACT-001", "name": "用户", "description": "请求问候的人。"}
+                ],
+                "use_cases": [
+                    {
+                        "id": "UC-001",
+                        "name": "获取问候",
+                        "goal": "用户获得问候文本。",
+                        "actor_ids": ["ACT-001"],
+                        "preconditions": [],
+                        "main_flow": ["用户请求问候", "系统返回 hello"],
+                        "alternative_flows": [],
+                        "postconditions": ["用户获得 hello"],
+                        "acceptance_links": [
+                            {"requirement_id": "FR-001", "criterion_indices": [1]}
+                        ],
+                    }
+                ],
+                "use_case_relationships": [],
+            },
+            {},
+        )
         baseline = {
             "question_id": "baseline-complete",
             "decision_key": "requirements_baseline",
@@ -379,9 +404,24 @@ class AgentLoopTests(unittest.TestCase):
                         "interfaces": ["greet()"],
                     }
                 ],
+                "uml_classes": [{"id": "CLS-001", "name": "Greeter", "attributes": [], "methods": ["greet()"], "requirement_ids": ["FR-001"]}],
+                "uml_relationships": [],
+                "sequences": [{"id": "SEQ-001", "name": "问候", "requirement_ids": ["FR-001"], "participants": ["用户", "Greeter"], "steps": [{"from": "用户", "to": "Greeter", "message": "请求问候"}]}],
+                "process_flows": [{"id": "FLOW-001", "name": "问候业务流程", "requirement_ids": ["FR-001"], "nodes": [{"id": "START", "type": "start", "label": "开始"}, {"id": "GREET", "type": "process", "label": "生成问候"}, {"id": "END", "type": "end", "label": "结束"}], "edges": [{"from": "START", "to": "GREET"}, {"from": "GREET", "to": "END"}]}],
+                "domain_objects": [{"id": "DOM-001", "name": "问候服务", "kind": "domain_service", "description": "生成问候。", "business_rules": ["返回 hello"], "requirement_ids": ["FR-001"]}],
             },
             {},
         )
+        workflow.request_user_input(
+            {
+                "question_id": "design-complete",
+                "decision_key": "design_baseline",
+                "question": "是否确认设计？",
+                "reason": "实现前确认设计基线。",
+                "options": [{"id": "approve", "label": "确认"}, {"id": "revise", "label": "修改"}],
+            }
+        )
+        workflow.answer_question("design-complete", option_id="approve")
         (self.registry.workspace.root / "main.py").write_text(
             "def greet(): return 'hello'\n", encoding="utf-8"
         )
@@ -393,18 +433,54 @@ class AgentLoopTests(unittest.TestCase):
             },
             {"change-ready": change},
         )
-        test = Evidence("test-ready", "run_command", True, "unittest · exit 0", 2, verification=True)
+        test = Evidence(
+            "test-ready",
+            "run_command",
+            True,
+            "python -m unittest -v · exit 0",
+            2,
+            verification=True,
+        )
+        workflow.record_evidence(
+            test,
+            {"command": "python -m unittest -v"},
+            {
+                "ok": True,
+                "exit_code": 0,
+                "stdout": "",
+                "stderr": (
+                    "test_greet_public (test_main.GreetingTests.test_greet_public) ... ok\n"
+                    "test_greet_branch (test_main.GreetingTests.test_greet_branch) ... ok\n"
+                    "Ran 2 tests in 0.001s\nOK"
+                ),
+            },
+        )
         workflow.update(
             {
                 "action": "link_tests",
                 "links": [
                     {
                         "requirement_id": "FR-001",
-                        "command": "python -m unittest",
+                        "command": "python -m unittest -v",
+                        "evidence_id": "test-ready",
+                        "evidence_kind": "integration_test",
+                        "test_method": "black_box",
+                        "test_level": "integration",
+                        "claim": "test_greet_public 通过公开接口验证 greet 返回 hello",
+                        "criterion_indices": [1],
+                        "test_case_ids": ["test_greet_public"],
+                    },
+                    {
+                        "requirement_id": "FR-001",
+                        "command": "python -m unittest -v",
                         "evidence_id": "test-ready",
                         "evidence_kind": "unit_test",
-                        "claim": "greet 返回 hello",
+                        "test_method": "white_box",
+                        "test_level": "unit",
+                        "module_ids": ["MOD-001"],
+                        "claim": "test_greet_branch 直接验证问候模块内部返回分支",
                         "criterion_indices": [1],
+                        "test_case_ids": ["test_greet_branch"],
                     }
                 ],
             },
@@ -420,23 +496,17 @@ class AgentLoopTests(unittest.TestCase):
             }
         )
         workflow.answer_question("accept-complete", option_id="approve")
+        self.assertTrue(workflow.is_completed)
 
-        client = FakeClient(
-            [
-                multiple_tool_reply(
-                    [
-                        ("update_engineering_state", {"action": "complete_project"}, "complete-1"),
-                        ("write_file", {"path": "late.py", "content": "bad = True\n"}, "late-1"),
-                    ]
-                )
-            ]
-        )
+        client = FakeClient([])
         result = CodingAgent(client, self.registry, engineering=workflow).run("继续验收")
 
         self.assertEqual(result.stop_reason, "completed")
+        self.assertEqual(result.steps, 0)
+        self.assertEqual(client.requests, [])
         self.assertFalse((self.registry.workspace.root / "late.py").exists())
         self.assertIn("剩余风险", result.final_text)
-        self.assertIn("skipped_project_completed", result.messages[-1]["content"])
+        self.assertEqual(result.messages[-1]["role"], "assistant")
 
     def test_engineering_phase_blocks_file_changes_outside_implementation(self) -> None:
         client = FakeClient(

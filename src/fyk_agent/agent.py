@@ -117,6 +117,19 @@ class CodingAgent:
         )
         self._notify_context(messages, step=0)
 
+        if self.engineering is not None and self.engineering.is_completed:
+            final_text = self.engineering.completion_summary()
+            messages.append({"role": "assistant", "content": final_text})
+            self.events.emit("run_finished", reason="completed", steps=0)
+            self.notify("finished", {"step": 0, "reason": "completed"})
+            return RunResult(
+                final_text,
+                0,
+                "completed",
+                messages,
+                self.context.compactions,
+            )
+
         for step in range(1, self.max_steps + 1):
             if self.cancelled():
                 return self._cancelled_result(messages, step - 1)

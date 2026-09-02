@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { FormEvent, useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 
 type AgentEvent = {
   type: string;
@@ -33,20 +33,58 @@ type PlanEvidence = { id: string; tool: string; ok: boolean; summary: string; st
 type PlanStep = { id: string; title: string; kind: 'inspect' | 'change' | 'verify' | 'other'; status: 'pending' | 'in_progress' | 'completed' | 'blocked'; evidence_ids: string[]; note: string; blocker_type?: 'tool_failure' | 'missing_prerequisite' | 'environment' | 'user_input_required' };
 type TaskPlan = { summary: string; steps: PlanStep[]; completed: number; total: number; terminal: boolean; blocked: boolean; evidence: PlanEvidence[] };
 type EngineeringOption = { id: string; label: string; description?: string; requires_input?: boolean; input_placeholder?: string };
-type EngineeringReview = { requirements: number; design_modules: number; implementation_links: number; verification_links: number; stale_evidence: number; residual_risk: string };
+type EngineeringReview = { requirements: number; design_modules: number; implementation_links: number; verification_links: number; stale_evidence: number; residual_risk: string; requirements_covered?: number; criteria_total?: number; criteria_covered?: number; black_box_links?: number; white_box_links?: number; deliverables?: string[]; modules_completed?: number; modules_total?: number; incomplete_modules?: ImplementationModuleAudit[]; invalid_module_links?: InvalidModuleLink[]; untracked_files?: string[] };
 type EngineeringWorkspaceReview = { project_title: string; requirements: number; workspace: string; warning: string };
 type EngineeringRequirement = { id: string; title: string; kind: 'functional' | 'non_functional'; description: string; acceptance_criteria: string[] };
-type EngineeringBaselineReview = { requirements: EngineeringRequirement[]; assumptions: string[]; digest: string };
-type EngineeringQuestion = { question_id: string; decision_key: string; question: string; reason: string; options: EngineeringOption[]; baseline_review?: EngineeringBaselineReview; review_summary?: EngineeringReview; workspace_review?: EngineeringWorkspaceReview };
+type UseCaseActor = { id: string; name: string; description: string };
+type UseCaseAlternativeFlow = { id: string; condition: string; steps: string[] };
+type UseCaseAcceptanceLink = { requirement_id: string; criterion_indices: number[] };
+type EngineeringUseCase = { id: string; name: string; goal: string; actor_ids: string[]; preconditions: string[]; main_flow: string[]; alternative_flows: UseCaseAlternativeFlow[]; postconditions: string[]; acceptance_links: UseCaseAcceptanceLink[]; requirement_ids?: string[] };
+type UseCaseRelationship = { from: string; to: string; type: 'include' | 'extend' | 'generalization'; label?: string };
+type EngineeringBaselineReview = { requirements: EngineeringRequirement[]; assumptions: string[]; actors?: UseCaseActor[]; use_cases?: EngineeringUseCase[]; use_case_relationships?: UseCaseRelationship[]; digest: string };
+type EngineeringModule = { id: string; name: string; responsibility: string; requirement_ids: string[]; interfaces: string[]; dependencies?: string[] };
+type UmlClass = { id: string; name: string; stereotype?: string; attributes: string[]; methods: string[]; requirement_ids: string[] };
+type UmlRelationship = { from: string; to: string; type: 'association' | 'inheritance' | 'composition' | 'aggregation' | 'dependency'; label?: string };
+type SequenceStep = { from: string; to: string; message: string; response?: boolean };
+type EngineeringSequence = { id: string; name: string; requirement_ids: string[]; participants: string[]; steps: SequenceStep[] };
+type ProcessFlowNode = { id: string; type: 'start' | 'process' | 'decision' | 'input_output' | 'end'; label: string };
+type ProcessFlowEdge = { from: string; to: string; label?: string };
+type ProcessFlow = { id: string; name: string; requirement_ids: string[]; direction?: 'TD' | 'LR'; nodes: ProcessFlowNode[]; edges: ProcessFlowEdge[] };
+type DomainObject = { id: string; name: string; kind: 'aggregate_root' | 'entity' | 'value_object' | 'domain_service' | 'repository'; description: string; business_rules: string[]; requirement_ids: string[] };
+type InvalidModuleLink = { requirement_id: string; module_id: string; path: string };
+type ImplementationModuleAudit = { id: string; name: string; required_requirement_ids: string[]; covered_requirement_ids: string[]; missing_requirement_ids: string[]; paths: string[]; complete: boolean };
+type ImplementationAudit = { passed: boolean; modules_total: number; modules_completed: number; modules: ImplementationModuleAudit[]; incomplete_modules: ImplementationModuleAudit[]; uncovered_requirements: string[]; invalid_module_links: InvalidModuleLink[]; tracked_files: string[]; changed_files: string[]; untracked_files: string[] };
+type TestCaseTrace = { requirement_id: string; criterion_indices: number[] };
+type VerificationTestCase = { id: string; name: string; suite: string; path: string; line?: number | null; method: 'black_box' | 'white_box' | 'supporting' | 'unclassified'; level: string; purpose: string; status: 'passed' | 'failed' | 'error' | 'skipped' | 'unknown'; detail?: string; traces?: TestCaseTrace[] };
+type TestMethodStats = { total: number; passed: number; failed: number; errors: number; skipped: number; unknown: number };
+type VerificationRun = { framework: string; command: string; status: 'passed' | 'failed'; total: number; passed: number; failed: number; errors: number; skipped: number; duration_seconds?: number | null; exit_code?: number | null; source: string; classified_cases: number; black_box: TestMethodStats; white_box: TestMethodStats; supporting?: TestMethodStats; unclassified: TestMethodStats; cases: VerificationTestCase[] };
+type SupportingCheck = { requirement_id: string; kind: string; claim: string; command: string; criterion_indices: number[] };
+type VerificationSummary = { latest_run?: VerificationRun | null; dynamic_trace_links: number; supporting_checks: number; supporting_items: SupportingCheck[] };
+type TestStrategyAudit = { required: boolean; passed: boolean; missing: string[]; functional_criteria_total: number; functional_criteria_black_box_covered: number; core_modules_total: number; core_modules_white_box_covered: number; missing_black_box_criteria: string[]; missing_white_box_modules: string[]; dynamic_links_without_cases: string[]; misclassified_supporting_links: string[]; black_box_cases: number; white_box_cases: number };
+type EngineeringDesignReview = { modules: EngineeringModule[]; uml_classes: UmlClass[]; uml_relationships: UmlRelationship[]; sequences: EngineeringSequence[]; process_flows?: ProcessFlow[]; domain_objects: DomainObject[]; digest: string };
+type EngineeringQuestion = { question_id: string; decision_key: string; question: string; reason: string; options: EngineeringOption[]; baseline_review?: EngineeringBaselineReview; design_review?: EngineeringDesignReview; review_summary?: EngineeringReview; workspace_review?: EngineeringWorkspaceReview };
 type EngineeringPhase = { id: string; title: string; status: 'pending' | 'active' | 'awaiting_user' | 'completed'; gate: { passed: boolean; missing: string[] } };
 type EngineeringState = {
   phase: string;
   status: string;
   project_title: string;
-  requirements: Array<{ id: string; title: string }>;
-  design_modules: Array<{ id: string; name: string }>;
-  implementation_links: Array<{ requirement_id: string; path: string }>;
-  test_links: Array<{ requirement_id: string; command: string }>;
+  requirements: EngineeringRequirement[];
+  assumptions?: string[];
+  actors?: UseCaseActor[];
+  use_cases?: EngineeringUseCase[];
+  use_case_relationships?: UseCaseRelationship[];
+  design_modules: EngineeringModule[];
+  uml_classes?: UmlClass[];
+  uml_relationships?: UmlRelationship[];
+  sequences?: EngineeringSequence[];
+  process_flows?: ProcessFlow[];
+  domain_objects?: DomainObject[];
+  implementation_links: Array<{ requirement_id: string; module_ids?: string[]; path: string }>;
+  implementation_audit?: ImplementationAudit;
+  test_links: Array<{ requirement_id: string; command: string; evidence_kind?: string; test_method?: 'black_box' | 'white_box'; test_level?: string; claim?: string; criterion_indices?: number[]; test_case_ids?: string[]; module_ids?: string[] }>;
+  verification_summary?: VerificationSummary;
+  test_strategy_audit?: TestStrategyAudit;
+  decisions?: Array<{ key: string; option_id: string; option_label: string; decided_at: string }>;
   pending_question?: EngineeringQuestion | null;
   phases: EngineeringPhase[];
   active_skill?: { id: string; title: string; description: string };
@@ -83,6 +121,7 @@ type ConversationSession = {
 };
 type ConversationStore = { items: ConversationSession[]; activeId: string };
 type DiffView = { path: string; diff: string; truncated: boolean };
+type EngineeringArtifactPhase = 'requirements' | 'design' | 'implementation' | 'verification' | 'acceptance';
 
 const demoSessions = [
   { title: '修复 slugify 测试', time: '刚刚', active: true },
@@ -112,6 +151,7 @@ export default function Home() {
   const [sessionActionError, setSessionActionError] = useState<{ id: string; message: string } | null>(null);
   const [diffView, setDiffView] = useState<DiffView | null>(null);
   const [diffLoading, setDiffLoading] = useState('');
+  const [engineeringArtifact, setEngineeringArtifact] = useState<EngineeringArtifactPhase | null>(null);
   const connection = useRef({ api: '', token: '' });
   const timelineEnd = useRef<HTMLDivElement>(null);
 
@@ -130,7 +170,7 @@ export default function Home() {
   const latestPlanEvent = [...events].reverse().find((event) => ['plan_updated', 'plan_reset'].includes(event.type));
   const activePlan = latestPlanEvent?.type === 'plan_updated' ? latestPlanEvent.plan : undefined;
   const latestEngineeringEvent = [...events].reverse().find((event) => event.type === 'engineering_state' && event.engineering);
-  const activeEngineering = latestEngineeringEvent?.engineering || status?.engineering;
+  const activeEngineering = status?.engineering || latestEngineeringEvent?.engineering;
 
   function updateSession(targetId: string, update: (session: ConversationSession) => ConversationSession) {
     setConversationStore((previous) => ({
@@ -140,6 +180,9 @@ export default function Home() {
   }
 
   function appendEvent(targetId: string, event: AgentEvent) {
+    if (event.type === 'engineering_state' && event.engineering) {
+      setStatus((current) => current ? { ...current, engineering: event.engineering } : current);
+    }
     updateSession(targetId, (session) => ({
       ...session,
       events: [
@@ -375,6 +418,19 @@ export default function Home() {
     if (data.ok) setFiles(data.entries || []);
   }
 
+  async function refreshStatus() {
+    const { api, token } = connection.current;
+    if (!api) return;
+    try {
+      const response = await fetch(`${api}/api/status`, { headers: { 'X-Yukai-Token': token } });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (data.ok) setStatus(data);
+    } catch {
+      // The streamed engineering_state event remains authoritative when this safety refresh is unavailable.
+    }
+  }
+
   async function toggleAutomaticApproval() {
     if (!status || running) return;
     const { api, token } = connection.current;
@@ -455,6 +511,7 @@ export default function Home() {
       await loadSessions(api, token);
       setApproval(null);
       setProjectPickerOpen(false);
+      await refreshStatus();
       await refreshFiles();
     } catch (error) {
       setPickerError(error instanceof Error ? error.message : '无法切换工作区');
@@ -508,6 +565,7 @@ export default function Home() {
         }
         if (done) break;
       }
+      await refreshStatus();
       await refreshFiles();
     } catch (error) {
       const messageText = error instanceof Error ? error.message : 'Agent 请求失败';
@@ -660,7 +718,7 @@ export default function Home() {
         </section>
 
         <aside className="inspector">
-          {live && activeSession.engineeringMode && activeEngineering && <EngineeringPanel engineering={activeEngineering} />}
+          {live && activeSession.engineeringMode && activeEngineering && <EngineeringPanel engineering={activeEngineering} onOpen={setEngineeringArtifact} />}
           {live && !activeSession.engineeringMode && activePlan && <PlanPanel plan={activePlan} />}
           <section className="inspector-section context-section">
             <div className="panel-heading"><span>会话上下文</span><b>{live ? `${contextPercent.toFixed(contextPercent < 1 ? 1 : 0)}%` : '24%'}</b></div><div className="meter"><i style={{ width: `${live ? contextPercent : 24}%` }} /></div><div className="meter-label"><span>{live ? `${activeSession.messageCount} 条消息` : '12 条消息'}</span><span>{live ? `${formatChars(activeSession.contextChars)} / ${formatChars(status?.max_context_chars || 0)}` : '192k / 800k chars'}</span></div>
@@ -676,6 +734,7 @@ export default function Home() {
       {approval && <ApprovalDialog event={approval} stopping={stopping} onDecision={decide} onStop={stopTask} />}
       {projectPickerOpen && <ProjectPicker projects={projects} directory={directory} error={pickerError} switching={switchingWorkspace} onBrowse={browseDirectory} onSelect={selectWorkspace} onClose={() => setProjectPickerOpen(false)} />}
       {diffView && <DiffDialog view={diffView} onClose={() => setDiffView(null)} />}
+      {engineeringArtifact && activeEngineering && <EngineeringArtifactDialog engineering={activeEngineering} initialPhase={engineeringArtifact} onClose={() => setEngineeringArtifact(null)} />}
     </main>
   );
 }
@@ -776,6 +835,7 @@ function EngineeringQuestionCard({ question, active, running, onAnswer }: { ques
   return <article className={`engineering-question ${active ? 'active' : 'resolved'}`}>
     <p className="eyebrow">ENGINEERING DECISION</p><h3>{question.question}</h3><p>{question.reason}</p>
     {question.baseline_review && <EngineeringBaselineReviewPanel review={question.baseline_review} />}
+    {question.design_review && <EngineeringDesignReviewPanel review={question.design_review} expanded={active} />}
     {question.review_summary && <EngineeringReviewSummary review={question.review_summary} />}
     {question.workspace_review && <div className="workspace-review"><b>当前已验收项目：{question.workspace_review.project_title}</b><small>{question.workspace_review.requirements} 项需求 · {question.workspace_review.workspace}</small><p>{question.workspace_review.warning}</p></div>}
     <div className="engineering-options">{question.options.map((option) => option.requires_input ? <button type="button" key={option.id} className={selected === option.id ? 'selected' : ''} disabled={!active || running} onClick={() => { setSelected(option.id); setAnswer(''); }}><b>{option.label}</b>{option.description && <small>{option.description}</small>}</button> : <button type="button" key={option.id} disabled={!active || running} onClick={() => onAnswer(question, option)}><b>{option.label}</b>{option.description && <small>{option.description}</small>}</button>)}</div>
@@ -785,23 +845,32 @@ function EngineeringQuestionCard({ question, active, running, onAnswer }: { ques
 }
 
 function EngineeringReviewSummary({ review }: { review: EngineeringReview }) {
-  return <div className="engineering-review"><div><b>{review.requirements}</b><small>需求</small></div><div><b>{review.design_modules}</b><small>模块</small></div><div><b>{review.verification_links}</b><small>验证证据</small></div><div className={review.stale_evidence ? 'warning' : ''}><b>{review.stale_evidence}</b><small>过期证据</small></div><p><b>剩余风险</b>{review.residual_risk}</p></div>;
+  const moduleValue = review.modules_total === undefined ? review.design_modules : `${review.modules_completed}/${review.modules_total}`;
+  const traceWarnings = [
+    ...(review.incomplete_modules || []).map((item) => `${item.id} 缺少 ${item.missing_requirement_ids.join('、')}`),
+    ...((review.untracked_files?.length || 0) ? [`${review.untracked_files?.length} 个已修改文件未追踪`] : []),
+    ...((review.invalid_module_links?.length || 0) ? [`${review.invalid_module_links?.length} 条模块映射无效`] : []),
+  ];
+  return <div className="engineering-review"><div><b>{review.requirements}</b><small>需求</small></div><div className={traceWarnings.length ? 'warning' : ''}><b>{moduleValue}</b><small>模块追踪</small></div><div><b>{review.verification_links}</b><small>验证证据</small></div><div className={review.stale_evidence ? 'warning' : ''}><b>{review.stale_evidence}</b><small>过期证据</small></div>{traceWarnings.length > 0 && <p className="warning"><b>追踪待完善</b>{traceWarnings.join('；')}</p>}<p><b>剩余风险</b>{review.residual_risk}</p></div>;
 }
 
 function EngineeringBaselineReviewPanel({ review }: { review: EngineeringBaselineReview }) {
+  const actors = review.actors || [];
+  const useCases = review.use_cases || [];
   return <section className="baseline-review" aria-label="待确认需求基线">
-    <div className="baseline-review-heading"><b>需求基线明细</b><span>{review.requirements.length} 项需求</span></div>
+    <div className="baseline-review-heading"><b>需求基线明细</b><span>{review.requirements.length} 项需求 · {useCases.length} 个用例</span></div>
     <div className="baseline-requirements">{review.requirements.map((requirement) => <article className="baseline-requirement" key={requirement.id}>
       <div><span className={requirement.kind === 'functional' ? 'functional' : 'non-functional'}>{requirement.kind === 'functional' ? 'FR' : 'NFR'}</span><b>{requirement.id} · {requirement.title}</b></div>
       <p>{requirement.description}</p>
       <small>验收标准</small>
       <ol>{requirement.acceptance_criteria.map((criterion, index) => <li key={`${requirement.id}-${index}`}>{criterion}</li>)}</ol>
     </article>)}</div>
+    <UseCaseModel actors={actors} useCases={useCases} relationships={review.use_case_relationships || []} requirements={review.requirements} legacyEmpty />
     <div className="baseline-assumptions"><b>默认决策与假设</b>{review.assumptions.length ? <ul>{review.assumptions.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>本次需求基线未记录额外默认决策。</p>}</div>
   </section>;
 }
 
-function EngineeringPanel({ engineering }: { engineering: EngineeringState }) {
+function EngineeringPanel({ engineering, onOpen }: { engineering: EngineeringState; onOpen: (phase: EngineeringArtifactPhase) => void }) {
   const linkedRequirements = new Set([
     ...engineering.implementation_links.map((item) => item.requirement_id),
     ...engineering.test_links.map((item) => item.requirement_id),
@@ -809,11 +878,303 @@ function EngineeringPanel({ engineering }: { engineering: EngineeringState }) {
   return <section className="inspector-section engineering-panel">
     <div className="panel-heading"><span>Yukai-SE 工程流程</span><b>{engineering.status === 'completed' ? 'DONE' : 'ACTIVE'}</b></div>
     <div className="active-skill"><span>SE</span><div><b>{engineering.active_skill?.title || '软件工程 Skill'}</b><small>{engineering.active_skill?.description}</small></div></div>
-    <div className="engineering-phases">{engineering.phases.map((phase) => <div className={`engineering-phase ${phase.status}`} key={phase.id}><span>{phase.status === 'completed' ? '✓' : phase.status === 'active' || phase.status === 'awaiting_user' ? '●' : '○'}</span><div><b>{phase.title}</b><small>{phase.gate.passed ? '质量门已满足' : phase.gate.missing[0] || '等待前序阶段'}</small></div></div>)}</div>
+    <div className="engineering-phases">{engineering.phases.map((phase) => <button type="button" className={`engineering-phase ${phase.status}`} key={phase.id} onClick={() => onOpen(phase.id as EngineeringArtifactPhase)}><span>{phase.status === 'completed' ? '✓' : phase.status === 'active' || phase.status === 'awaiting_user' ? '●' : '○'}</span><div><b>{phase.title}</b><small>{phase.gate.passed ? '质量门已满足 · 查看结果' : phase.gate.missing[0] || '等待前序阶段'}</small></div><em>›</em></button>)}</div>
     <div className="engineering-stats"><div><b>{engineering.requirements.length}</b><span>需求</span></div><div><b>{engineering.design_modules.length}</b><span>模块</span></div><div><b>{linkedRequirements}</b><span>追踪项</span></div></div>
     <small className="engineering-artifacts">产物保存在 <code>.yukai/engineering</code></small>
   </section>;
 }
+
+function EngineeringDesignReviewPanel({ review, expanded }: { review: EngineeringDesignReview; expanded: boolean }) {
+  const uml = buildClassDiagram(review.uml_classes, review.uml_relationships);
+  const processFlows = review.process_flows || [];
+  const modules = <div className="design-review-modules">{review.modules.map((module) => <article key={module.id}><b>{module.id} · {module.name}</b><p>{module.responsibility}</p><small>需求：{module.requirement_ids.join('、')}</small></article>)}</div>;
+  return <section className="design-review-summary" aria-label="待确认设计基线">
+    <div><b>设计基线明细</b><span>{review.modules.length} 模块 · {review.uml_classes.length} 类 · {review.sequences.length} 时序 · {processFlows.length} 业务流程 · {review.domain_objects.length} 领域对象</span></div>
+    {expanded ? <div className="design-review-content">
+      <section><h4>UML 类图</h4>{uml ? <MermaidDiagram chart={uml} /> : <ArtifactEmpty text="尚未生成 UML 类图" />}</section>
+      <section><h4>关键时序图</h4>{review.sequences.map((sequence) => <article className="design-review-sequence" key={sequence.id}><b>{sequence.id} · {sequence.name}</b><MermaidDiagram chart={buildSequenceDiagram(sequence)} /></article>)}</section>
+      <section><h4>系统业务流程图</h4>{processFlows.length ? processFlows.map((flow) => <article className="design-review-sequence" key={flow.id}><b>{flow.id} · {flow.name}</b><MermaidDiagram chart={buildProcessFlowDiagram(flow)} /></article>) : <ArtifactEmpty text="旧设计基线未包含系统业务流程图" />}</section>
+      <section><h4>领域模型</h4><div className="design-review-domains">{review.domain_objects.map((item) => <article key={item.id}><b>{domainKindLabel(item.kind)} · {item.name}</b><p>{item.description}</p><small>{item.business_rules.join('；')}</small></article>)}</div></section>
+      <section><h4>设计模块</h4>{modules}</section>
+    </div> : modules}
+  </section>;
+}
+
+function EngineeringArtifactDialog({ engineering, initialPhase, onClose }: { engineering: EngineeringState; initialPhase: EngineeringArtifactPhase; onClose: () => void }) {
+  const [phase, setPhase] = useState<EngineeringArtifactPhase>(initialPhase);
+  const labels: Record<EngineeringArtifactPhase, string> = { requirements: '需求分析', design: '结构化设计', implementation: '结构化实现', verification: '测试验证', acceptance: '验收交付' };
+  return <div className="modal-backdrop"><section className="engineering-artifact-dialog" role="dialog" aria-modal="true" aria-labelledby="engineering-artifact-title">
+    <header><div><p className="eyebrow">YUKAI-SE ARTIFACT</p><h2 id="engineering-artifact-title">{engineering.project_title || '软件工程项目'}</h2></div><button className="dialog-close" type="button" onClick={onClose} aria-label="关闭工程产物">×</button></header>
+    <nav aria-label="工程阶段">{engineering.phases.map((item) => <button type="button" key={item.id} className={phase === item.id ? 'active' : ''} onClick={() => setPhase(item.id as EngineeringArtifactPhase)}><span>{item.status === 'completed' ? '✓' : item.status === 'active' || item.status === 'awaiting_user' ? '●' : '○'}</span>{labels[item.id as EngineeringArtifactPhase]}</button>)}</nav>
+    <div className="engineering-artifact-body">
+      {phase === 'requirements' && <RequirementsArtifact engineering={engineering} />}
+      {phase === 'design' && <DesignArtifact engineering={engineering} />}
+      {phase === 'implementation' && <ImplementationArtifact engineering={engineering} />}
+      {phase === 'verification' && <VerificationArtifact engineering={engineering} />}
+      {phase === 'acceptance' && <AcceptanceArtifact engineering={engineering} />}
+    </div>
+  </section></div>;
+}
+
+function ArtifactHeading({ eyebrow, title, detail }: { eyebrow: string; title: string; detail: string }) {
+  return <div className="artifact-heading"><div><p className="eyebrow">{eyebrow}</p><h3>{title}</h3></div><span>{detail}</span></div>;
+}
+
+function RequirementsArtifact({ engineering }: { engineering: EngineeringState }) {
+  return <><ArtifactHeading eyebrow="REQUIREMENTS BASELINE" title="FR / NFR 与验收标准" detail={`${engineering.requirements.length} 项需求`} />
+    <div className="artifact-requirements">{engineering.requirements.map((requirement) => {
+      const verified = new Set(engineering.test_links.filter((link) => link.requirement_id === requirement.id).flatMap((link) => link.criterion_indices || []));
+      return <article key={requirement.id}><header><span className={requirement.kind === 'functional' ? 'functional' : 'non-functional'}>{requirement.kind === 'functional' ? 'FR' : 'NFR'}</span><b>{requirement.id} · {requirement.title}</b><em>{verified.size}/{requirement.acceptance_criteria.length} 已验证</em></header><p>{requirement.description}</p><ol>{requirement.acceptance_criteria.map((criterion, index) => <li className={verified.has(index + 1) ? 'verified' : ''} key={index}><span>{verified.has(index + 1) ? '✓' : '○'}</span>{criterion}</li>)}</ol></article>;
+    })}</div>
+    <UseCaseModel actors={engineering.actors || []} useCases={engineering.use_cases || []} relationships={engineering.use_case_relationships || []} requirements={engineering.requirements} legacyEmpty />
+  </>;
+}
+
+function UseCaseModel({ actors, useCases, relationships, requirements, legacyEmpty = false }: { actors: UseCaseActor[]; useCases: EngineeringUseCase[]; relationships: UseCaseRelationship[]; requirements: EngineeringRequirement[]; legacyEmpty?: boolean }) {
+  const [selected, setSelected] = useState(useCases[0]?.id || '');
+  const markerId = `use-case-arrow-${useId().replace(/:/g, '')}`;
+  const generalizationMarkerId = `${markerId}-generalization`;
+  if (!actors.length || !useCases.length) return <section className="artifact-section use-case-section"><h4>用例模型</h4><ArtifactEmpty text={legacyEmpty ? '旧需求基线未包含用例模型；重新进入需求分析并建立新基线后可生成' : '尚未生成用例模型'} /></section>;
+  const rows = Math.ceil(useCases.length / 2);
+  const height = Math.max(430, rows * 128 + 120, actors.length * 145 + 90);
+  const actorPositions = new Map(actors.map((actor, index) => [actor.id, { x: 105, y: 105 + index * Math.max(120, (height - 170) / Math.max(1, actors.length - 1)) }]));
+  const useCasePositions = new Map(useCases.map((useCase, index) => [useCase.id, { x: 490 + (index % 2) * 340, y: 120 + Math.floor(index / 2) * 128 }]));
+  const selectedUseCase = useCases.find((item) => item.id === selected) || useCases[0];
+  const functionalCriteria = requirements.filter((item) => item.kind === 'functional').reduce((sum, item) => sum + item.acceptance_criteria.length, 0);
+  const coveredCriteria = new Set(useCases.flatMap((item) => item.acceptance_links.flatMap((link) => link.criterion_indices.map((index) => `${link.requirement_id}:${index}`)))).size;
+  return <section className="artifact-section use-case-section"><div className="use-case-heading"><div><h4>UML 用例模型</h4><p>点击用例节点可查看完整规约；虚线箭头表示 include / extend 关系。</p></div><div><span>{actors.length} 参与者</span><span>{useCases.length} 用例</span><span>{coveredCriteria}/{functionalCriteria} FR 验收标准</span></div></div>
+    <div className="use-case-diagram-scroll"><svg className="use-case-diagram" viewBox={`0 0 1060 ${height}`} role="img" aria-label="系统 UML 用例图">
+      <defs><marker className="use-case-dependency-marker" id={markerId} markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8" /></marker><marker className="use-case-generalization-marker" id={generalizationMarkerId} markerWidth="11" markerHeight="9" refX="10" refY="4.5" orient="auto"><path d="M0,0 L10,4.5 L0,9 z" /></marker></defs>
+      <rect className="use-case-system-boundary" x="255" y="35" width="770" height={height - 70} rx="12" />
+      <text className="use-case-system-title" x="278" y="66">{truncateLabel('系统用例边界', 18)}</text>
+      {useCases.flatMap((useCase) => useCase.actor_ids.map((actorId) => { const actor = actorPositions.get(actorId); const target = useCasePositions.get(useCase.id); return actor && target ? <line className="use-case-association" key={`${actorId}-${useCase.id}`} x1={actor.x + 28} y1={actor.y} x2={target.x - 142} y2={target.y} /> : null; }))}
+      {relationships.map((relationship, index) => { const source = useCasePositions.get(relationship.from); const target = useCasePositions.get(relationship.to); if (!source || !target) return null; const points = ellipseConnection(source, target); const stereotype = relationship.type === 'generalization' ? relationship.label || '泛化' : `«${relationship.type}»${relationship.label ? ` ${relationship.label}` : ''}`; return <g className={`use-case-relation ${relationship.type}`} key={`${relationship.from}-${relationship.to}-${index}`}><line x1={points.x1} y1={points.y1} x2={points.x2} y2={points.y2} markerEnd={`url(#${relationship.type === 'generalization' ? generalizationMarkerId : markerId})`} /><text x={(source.x + target.x) / 2} y={(source.y + target.y) / 2 - 8}>{stereotype}</text></g>; })}
+      {actors.map((actor) => { const point = actorPositions.get(actor.id)!; return <g className="use-case-actor" key={actor.id}><circle cx={point.x} cy={point.y - 31} r="12" /><line x1={point.x} y1={point.y - 19} x2={point.x} y2={point.y + 19} /><line x1={point.x - 22} y1={point.y - 3} x2={point.x + 22} y2={point.y - 3} /><line x1={point.x} y1={point.y + 19} x2={point.x - 18} y2={point.y + 46} /><line x1={point.x} y1={point.y + 19} x2={point.x + 18} y2={point.y + 46} /><text x={point.x} y={point.y + 70}>{truncateLabel(actor.name, 12)}</text><title>{actor.id} · {actor.name}：{actor.description}</title></g>; })}
+      {useCases.map((useCase) => { const point = useCasePositions.get(useCase.id)!; const active = selectedUseCase.id === useCase.id; return <g className={`use-case-node ${active ? 'selected' : ''}`} role="button" tabIndex={0} aria-label={`查看 ${useCase.id} ${useCase.name}`} key={useCase.id} onClick={() => setSelected(useCase.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelected(useCase.id); } }}><ellipse cx={point.x} cy={point.y} rx="138" ry="42" /><text x={point.x} y={point.y - 2}>{truncateLabel(useCase.name, 18)}</text><text className="use-case-id" x={point.x} y={point.y + 20}>{useCase.id}</text><title>{useCase.goal}</title></g>; })}
+    </svg></div>
+    <div className="use-case-legend"><span><i className="actor" />参与者关联</span><span><i className="include" />«include» 必须复用</span><span><i className="extend" />«extend» 条件扩展</span><span><i className="generalization" />泛化</span></div>
+    <UseCaseSpecification useCase={selectedUseCase} actors={actors} requirements={requirements} />
+  </section>;
+}
+
+function UseCaseSpecification({ useCase, actors, requirements }: { useCase: EngineeringUseCase; actors: UseCaseActor[]; requirements: EngineeringRequirement[] }) {
+  const actorNames = useCase.actor_ids.map((id) => actors.find((actor) => actor.id === id)?.name || id);
+  return <article className="use-case-specification"><header><div><span>USE CASE SPECIFICATION</span><h5>{useCase.id} · {useCase.name}</h5></div><em>{actorNames.join('、')}</em></header><p className="use-case-goal"><b>目标</b>{useCase.goal}</p><div className="use-case-condition-grid"><section><b>前置条件</b>{useCase.preconditions.length ? <ul>{useCase.preconditions.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>无</p>}</section><section><b>后置条件</b><ul>{useCase.postconditions.map((item, index) => <li key={index}>{item}</li>)}</ul></section></div><section className="use-case-main-flow"><b>主成功场景</b><ol>{useCase.main_flow.map((step, index) => <li key={index}><span>{index + 1}</span><p>{step}</p></li>)}</ol></section><section className="use-case-alternatives"><b>备选 / 异常流程</b>{useCase.alternative_flows.length ? useCase.alternative_flows.map((flow) => <details key={flow.id}><summary><span>{flow.id}</span><b>{flow.condition}</b></summary><ol>{flow.steps.map((step, index) => <li key={index}>{step}</li>)}</ol></details>) : <p>没有单独定义备选流程。</p>}</section><section className="use-case-trace"><b>需求与验收标准追踪</b>{useCase.acceptance_links.map((link) => { const requirement = requirements.find((item) => item.id === link.requirement_id); return <article key={link.requirement_id}><strong>{link.requirement_id} · {requirement?.title || '未找到需求'}</strong><ul>{link.criterion_indices.map((index) => <li key={index}><span>AC-{index}</span>{requirement?.acceptance_criteria[index - 1] || `验收标准 ${index}`}</li>)}</ul></article>; })}</section></article>;
+}
+
+function truncateLabel(value: string, length: number) { return value.length > length ? `${value.slice(0, length - 1)}…` : value; }
+
+function ellipseConnection(source: { x: number; y: number }, target: { x: number; y: number }) {
+  const dx = target.x - source.x;
+  const dy = target.y - source.y;
+  const boundaryScale = 1 / Math.sqrt((dx * dx) / (138 * 138) + (dy * dy) / (42 * 42));
+  return { x1: source.x + dx * boundaryScale, y1: source.y + dy * boundaryScale, x2: target.x - dx * boundaryScale, y2: target.y - dy * boundaryScale };
+}
+
+function DesignArtifact({ engineering }: { engineering: EngineeringState }) {
+  const uml = buildClassDiagram(engineering.uml_classes || [], engineering.uml_relationships || []);
+  return <><ArtifactHeading eyebrow="DESIGN BASELINE" title="UML、时序图、业务流程与领域模型" detail={`${engineering.design_modules.length} 模块`} />
+    <section className="artifact-section"><h4>UML 类图</h4>{uml ? <MermaidDiagram chart={uml} /> : <ArtifactEmpty text="尚未生成 UML 类图" />}</section>
+    <section className="artifact-section"><h4>关键业务时序图</h4>{engineering.sequences?.length ? <div className="sequence-grid">{engineering.sequences.map((sequence) => <article key={sequence.id}><div><b>{sequence.id} · {sequence.name}</b><small>{sequence.requirement_ids.join('、')}</small></div><MermaidDiagram chart={buildSequenceDiagram(sequence)} /></article>)}</div> : <ArtifactEmpty text="尚未生成业务时序图" />}</section>
+    <section className="artifact-section"><h4>系统业务流程图</h4>{engineering.process_flows?.length ? <div className="sequence-grid process-flow-grid">{engineering.process_flows.map((flow) => <article key={flow.id}><div><b>{flow.id} · {flow.name}</b><small>覆盖需求：{flow.requirement_ids.join('、')}</small></div><MermaidDiagram chart={buildProcessFlowDiagram(flow)} /></article>)}</div> : <ArtifactEmpty text="当前设计基线尚未包含系统业务流程图；重新进入设计阶段后可生成" />}</section>
+    <section className="artifact-section"><h4>领域模型</h4>{engineering.domain_objects?.length ? <div className="domain-model-grid">{engineering.domain_objects.map((item) => <article key={item.id} className={`domain-${item.kind}`}><header><span>{domainKindLabel(item.kind)}</span><b>{item.name}</b></header><p>{item.description}</p>{item.business_rules.length > 0 && <ul>{item.business_rules.map((rule, index) => <li key={index}>{rule}</li>)}</ul>}<small>{item.requirement_ids.join('、')}</small></article>)}</div> : <ArtifactEmpty text="尚未生成领域模型" />}</section>
+    <section className="artifact-section"><h4>设计模块</h4><div className="design-module-grid">{engineering.design_modules.map((module) => <article key={module.id}><header><b>{module.id} · {module.name}</b><span>{module.requirement_ids.length} 需求</span></header><p>{module.responsibility}</p>{module.interfaces.length > 0 && <small>接口：{module.interfaces.join('；')}</small>}{module.dependencies?.length ? <small>依赖：{module.dependencies.join('、')}</small> : null}</article>)}</div></section>
+  </>;
+}
+
+function ImplementationArtifact({ engineering }: { engineering: EngineeringState }) {
+  const audit = engineering.implementation_audit;
+  const completed = audit?.modules_completed ?? engineering.design_modules.filter((module) => moduleImplementationStatus(engineering, module).complete).length;
+  const percent = engineering.design_modules.length ? Math.round(completed / engineering.design_modules.length * 100) : 0;
+  const covered = new Set(engineering.implementation_links.map((link) => link.requirement_id)).size;
+  return <><ArtifactHeading eyebrow="IMPLEMENTATION TRACE" title="模块—文件映射与实现进度" detail={`${completed}/${engineering.design_modules.length} 模块`} />
+    <div className="artifact-progress"><div><b>{percent}%</b><span>模块实现追踪完整率</span></div><div className="artifact-progress-track"><i style={{ width: `${percent}%` }} /></div><small>需求实现覆盖 {covered}/{engineering.requirements.length}</small></div>
+    <div className="implementation-map">{engineering.design_modules.map((module) => { const audited = audit?.modules.find((item) => item.id === module.id); const paths = audited?.paths || implementationPaths(engineering, module); const fallback = moduleImplementationStatus(engineering, module); const status = audited ? { complete: audited.complete, covered: audited.covered_requirement_ids.length, total: audited.required_requirement_ids.length, missing: audited.missing_requirement_ids } : { ...fallback, missing: module.requirement_ids.filter((item) => !engineering.implementation_links.some((link) => link.requirement_id === item && link.module_ids?.includes(module.id))) }; const state = status.complete ? 'implemented' : status.covered > 0 ? 'partial' : ''; return <article key={module.id} className={state}><header><span>{status.complete ? '✓' : status.covered ? '◐' : '○'}</span><b>{module.id} · {module.name}</b><em>{status.complete ? '已完成追踪' : status.covered ? `进行中 ${status.covered}/${status.total}` : '待追踪'}</em></header><p>{module.responsibility}</p><div>{paths.length ? paths.map((path) => <code key={path}>{path}</code>) : <small>尚未绑定文件修改证据</small>}</div>{status.missing.length > 0 && <div className="module-missing"><b>缺少需求映射</b><span>{status.missing.join('、')}</span></div>}<footer>{module.requirement_ids.join('、')}</footer></article>; })}</div>
+    {audit && (audit.untracked_files.length > 0 || audit.invalid_module_links.length > 0) && <section className="traceability-alert"><h4>实现追踪待完善</h4>{audit.untracked_files.length > 0 && <div><b>未追踪的已修改文件</b>{audit.untracked_files.map((path) => <code key={path}>{path}</code>)}</div>}{audit.invalid_module_links.length > 0 && <div><b>无效模块映射</b>{audit.invalid_module_links.map((item, index) => <code key={`${item.requirement_id}-${item.module_id}-${index}`}>{item.requirement_id} → {item.module_id} · {item.path}</code>)}</div>}</section>}
+  </>;
+}
+
+function VerificationArtifact({ engineering }: { engineering: EngineeringState }) {
+  const [tab, setTab] = useState<'overview' | 'black_box' | 'white_box' | 'coverage' | 'supporting'>('overview');
+  const summary = engineering.verification_summary;
+  const run = summary?.latest_run;
+  const blackCases = run?.cases.filter((item) => item.method === 'black_box') || [];
+  const whiteCases = run?.cases.filter((item) => item.method === 'white_box') || [];
+  const supportingCases = run?.cases.filter((item) => item.method === 'supporting') || [];
+  const supporting = summary?.supporting_items || [];
+  const tabs = [
+    { id: 'overview', label: '测试总览', count: run?.total },
+    { id: 'black_box', label: '黑盒测试', count: run?.black_box.total },
+    { id: 'white_box', label: '白盒测试', count: run?.white_box.total },
+    { id: 'coverage', label: '需求覆盖', count: engineering.requirements.length },
+    { id: 'supporting', label: '辅助检查', count: supportingCases.length || summary?.supporting_checks },
+  ] as const;
+  return <><ArtifactHeading eyebrow="VERIFICATION EVIDENCE" title="真实测试用例与需求覆盖" detail={run ? `${run.passed}/${run.total} 通过` : '尚无结构化测试运行'} />
+    {run ? <>
+      <section className={`test-run-banner ${run.status}`}><div><span>{run.status === 'passed' ? '✓' : '!'}</span><div><b>{run.status === 'passed' ? '本次测试运行通过' : '本次测试运行存在失败'}</b><small>{run.framework} · 退出码 {run.exit_code ?? '未记录'} · {run.duration_seconds == null ? '耗时未记录' : `耗时 ${run.duration_seconds.toFixed(3)} 秒`}</small></div></div><code>{run.command}</code></section>
+      <div className="test-result-stats"><div><b>{run.total}</b><span>真实测试用例</span></div><div className="passed"><b>{run.passed}</b><span>通过</span></div><div className={run.failed ? 'failed' : ''}><b>{run.failed}</b><span>失败</span></div><div className={run.errors ? 'failed' : ''}><b>{run.errors}</b><span>错误</span></div><div><b>{run.skipped}</b><span>跳过</span></div></div>
+      <nav className="test-artifact-tabs" aria-label="测试结果分类">{tabs.map((item) => <button type="button" key={item.id} className={tab === item.id ? 'active' : ''} onClick={() => setTab(item.id)}>{item.label}<span>{item.count ?? 0}</span></button>)}</nav>
+      {tab === 'overview' && <TestOverview run={run} summary={summary} audit={engineering.test_strategy_audit} />}
+      {tab === 'black_box' && <TestCaseGroups cases={blackCases} requirements={engineering.requirements} empty="没有识别到黑盒测试用例" />}
+      {tab === 'white_box' && <TestCaseGroups cases={whiteCases} requirements={engineering.requirements} empty="没有识别到白盒测试用例" />}
+      {tab === 'coverage' && <RequirementTestCoverage engineering={engineering} cases={run.cases} />}
+      {tab === 'supporting' && <SupportingChecks items={supporting} cases={supportingCases} requirements={engineering.requirements} />}
+    </> : <><div className="traceability-alert"><h4>尚未记录真实测试用例</h4><p>当前只有需求证据关系，重新运行详细测试后才能显示真实用例数量与结果。</p></div><TestEvidenceGroup title="现有验证证据" links={engineering.test_links} /></>}
+  </>;
+}
+
+function TestEvidenceGroup({ title, links }: { title: string; links: EngineeringState['test_links'] }) {
+  return <section className="artifact-section test-evidence-section"><h4>{title}</h4>{links.length ? <div>{links.map((link, index) => <article key={`${link.requirement_id}-${link.command}-${index}`}><header><b>{link.requirement_id}</b><span>{testLevelLabel(link.test_level)}</span><em>✓ 通过</em></header><p>{link.claim || '已绑定成功验证证据'}</p><code>{link.command}</code><small>验收标准：{link.criterion_indices?.join('、') || '未记录'}</small></article>)}</div> : <ArtifactEmpty text={`暂无${title}证据`} />}</section>;
+}
+
+function TestOverview({ run, summary, audit }: { run: VerificationRun; summary?: VerificationSummary; audit?: TestStrategyAudit }) {
+  const strategyReady = audit ? audit.passed : false;
+  return <div className="test-overview"><div className="test-method-stats"><TestMethodCard label="BLACK BOX" title="黑盒测试" stats={run.black_box} detail="从系统外部验证公开接口、输入、输出与错误行为" /><TestMethodCard label="WHITE BOX" title="白盒测试" stats={run.white_box} detail="直接验证内部模块、分支、状态转换和数据不变量" /><div><span>SUPPORTING</span><b>{summary?.supporting_checks || 0}</b><small>辅助检查，不计入黑白盒用例</small></div>{run.unclassified.total > 0 && <TestMethodCard label="UNCLASSIFIED" title="未分类" stats={run.unclassified} detail="需要在测试文件或类中声明测试方法" />}</div>{audit && <section className={`test-strategy-audit ${strategyReady ? 'passed' : 'incomplete'}`}><header><div><b>黑白盒质量门</b><small>{audit.required ? '新工程强制约束' : '历史工程仅评估，不阻断验收'}</small></div><span>{strategyReady ? '✓ 已满足' : '! 待完善'}</span></header><div><article><strong>{audit.functional_criteria_black_box_covered}/{audit.functional_criteria_total}</strong><b>功能验收标准黑盒覆盖</b><small>每条功能验收标准至少由一个公开行为测试证明</small></article><article><strong>{audit.core_modules_white_box_covered}/{audit.core_modules_total}</strong><b>核心模块白盒覆盖</b><small>每个承载功能需求的设计模块至少有一个业务白盒用例</small></article></div>{audit.missing.length > 0 && <ul>{audit.missing.map((item) => <li key={item}>{item}</li>)}</ul>}</section>}<section className="test-scope-note"><b>测试分类边界</b><p>黑盒测试通过系统公开接口验证输入、输出和错误行为；白盒测试直接验证内部模块、分支、状态转换和数据一致性。静态分析、导入检查与依赖检查单独列为辅助证据。</p><small>{summary?.dynamic_trace_links || 0} 条动态测试证据关系 · {summary?.supporting_checks || 0} 项辅助检查</small></section></div>;
+}
+
+function TestMethodCard({ label, title, stats, detail }: { label: string; title: string; stats: TestMethodStats; detail: string }) {
+  return <div className={stats.failed || stats.errors ? 'has-failure' : ''}><span>{label}</span><b>{stats.passed}/{stats.total}</b><strong>{title}</strong><small>{detail}</small></div>;
+}
+
+function TestCaseGroups({ cases, requirements, empty }: { cases: VerificationTestCase[]; requirements: EngineeringRequirement[]; empty: string }) {
+  if (!cases.length) return <ArtifactEmpty text={empty} />;
+  const groups = [...cases.reduce((map, item) => { const key = item.path || item.suite || '未识别测试文件'; const current = map.get(key) || []; current.push(item); map.set(key, current); return map; }, new Map<string, VerificationTestCase[]>())];
+  return <div className="test-case-groups">{groups.map(([path, items]) => { const passed = items.filter((item) => item.status === 'passed').length; return <details key={path} open><summary><div><b>{path}</b><small>{[...new Set(items.map((item) => item.suite))].join(' · ')}</small></div><span className={passed === items.length ? 'passed' : 'failed'}>{passed}/{items.length} 通过</span></summary><div className="test-case-list">{items.map((item) => <TestCaseDetail key={item.id} item={item} requirements={requirements} />)}</div></details>; })}</div>;
+}
+
+function TestCaseDetail({ item, requirements }: { item: VerificationTestCase; requirements: EngineeringRequirement[] }) {
+  return <details className={`test-case-detail ${item.status}`}><summary><span>{testStatusIcon(item.status)}</span><div><b>{item.name}</b><small>{item.purpose}</small></div><em>{testStatusLabel(item.status)}</em></summary><div><dl><dt>测试层级</dt><dd>{testLevelLabel(item.level)}</dd><dt>源文件</dt><dd><code>{item.path}{item.line ? `:${item.line}` : ''}</code></dd><dt>完整标识</dt><dd><code>{item.id}</code></dd></dl>{item.traces?.length ? <section><b>覆盖需求与验收标准</b>{item.traces.map((trace, index) => { const requirement = requirements.find((value) => value.id === trace.requirement_id); return <p key={`${trace.requirement_id}-${index}`}><strong>{trace.requirement_id} · {requirement?.title || '未找到需求标题'}</strong><span>{trace.criterion_indices.map((criterion) => requirement?.acceptance_criteria[criterion - 1] || `验收标准 ${criterion}`).join('；')}</span></p>; })}</section> : <p className="test-unlinked">该用例尚未单独绑定需求；不影响运行结果，但追踪信息仍可完善。</p>}{item.detail && <pre>{item.detail}</pre>}</div></details>;
+}
+
+function RequirementTestCoverage({ engineering, cases }: { engineering: EngineeringState; cases: VerificationTestCase[] }) {
+  return <div className="requirement-test-coverage">{engineering.requirements.map((requirement) => { const links = engineering.test_links.filter((link) => link.requirement_id === requirement.id); const covered = new Set(links.flatMap((link) => link.criterion_indices || [])); const linkedCases = cases.filter((item) => item.traces?.some((trace) => trace.requirement_id === requirement.id)); return <details key={requirement.id}><summary><div><b>{requirement.id} · {requirement.title}</b><small>{linkedCases.length} 个明确关联用例 · {links.length} 条证据关系</small></div><span className={covered.size === requirement.acceptance_criteria.length ? 'passed' : 'failed'}>{covered.size}/{requirement.acceptance_criteria.length} 验收标准</span></summary><ol>{requirement.acceptance_criteria.map((criterion, index) => <li key={index} className={covered.has(index + 1) ? 'passed' : ''}><span>{covered.has(index + 1) ? '✓' : '○'}</span><div><b>{criterion}</b>{linkedCases.filter((item) => item.traces?.some((trace) => trace.requirement_id === requirement.id && trace.criterion_indices.includes(index + 1))).map((item) => <code key={item.id}>{item.name}</code>)}</div></li>)}</ol></details>; })}</div>;
+}
+
+function SupportingChecks({ items, cases, requirements }: { items: SupportingCheck[]; cases: VerificationTestCase[]; requirements: EngineeringRequirement[] }) {
+  return <div className="supporting-checks"><section className="test-scope-note"><b>辅助检查不属于黑盒或白盒测试</b><p>这里展示依赖/结构合规测试、静态分析、文件检查和环境检查。它们可以证明约束，但不会增加业务黑盒或白盒用例数量。</p></section>{cases.length > 0 && <TestCaseGroups cases={cases} requirements={requirements} empty="暂无辅助测试用例" />}{items.length ? items.map((item, index) => <article key={`${item.requirement_id}-${index}`}><span>✓</span><div><header><b>{item.requirement_id}</b><em>{item.kind === 'inspection' ? '人工/静态检查' : item.kind === 'supporting_test' ? '辅助合规测试' : item.kind}</em></header><p>{item.claim}</p><code>{item.command}</code><small>验收标准：{item.criterion_indices.join('、')}</small></div></article>) : cases.length === 0 ? <ArtifactEmpty text="暂无辅助检查" /> : null}</div>;
+}
+
+function testStatusIcon(status: VerificationTestCase['status']) { return status === 'passed' ? '✓' : status === 'skipped' ? '−' : status === 'unknown' ? '?' : '×'; }
+function testStatusLabel(status: VerificationTestCase['status']) { return ({ passed: '通过', failed: '失败', error: '错误', skipped: '跳过', unknown: '未记录' } as const)[status]; }
+
+function AcceptanceArtifact({ engineering }: { engineering: EngineeringState }) {
+  const audit = engineering.implementation_audit;
+  const testRun = engineering.verification_summary?.latest_run;
+  const requirementCovered = new Set(engineering.implementation_links.map((link) => link.requirement_id)).size;
+  const criteriaTotal = engineering.requirements.reduce((sum, item) => sum + item.acceptance_criteria.length, 0);
+  const criteriaCovered = engineering.requirements.reduce((sum, requirement) => sum + new Set(engineering.test_links.filter((link) => link.requirement_id === requirement.id).flatMap((link) => link.criterion_indices || [])).size, 0);
+  const moduleCompleted = audit?.modules_completed ?? engineering.design_modules.filter((module) => moduleImplementationStatus(engineering, module).complete).length;
+  const deliverables = [...new Set([...(audit?.changed_files || []), ...engineering.implementation_links.map((link) => link.path)])].sort();
+  const acceptanceDecision = engineering.decisions?.find((decision) => decision.key === 'project_acceptance' && ['approve', 'accept', 'accepted', 'confirm', 'confirmed', 'yes'].includes(decision.option_id.toLowerCase()));
+  const traceabilityComplete = audit?.passed ?? moduleCompleted === engineering.design_modules.length;
+  const testStrategy = engineering.test_strategy_audit;
+  const testStrategyReady = !testStrategy?.required || testStrategy.passed;
+  const accepted = engineering.status === 'completed' && traceabilityComplete && testStrategyReady && requirementCovered === engineering.requirements.length && criteriaCovered === criteriaTotal ? acceptanceDecision : undefined;
+  const risks = [
+    ...(criteriaCovered < criteriaTotal ? [`仍有 ${criteriaTotal - criteriaCovered} 条验收标准缺少验证证据`] : []),
+    ...(requirementCovered < engineering.requirements.length ? [`仍有 ${engineering.requirements.length - requirementCovered} 项需求缺少实现映射`] : []),
+    ...((audit?.incomplete_modules || []).map((item) => `${item.id} 缺少需求映射：${item.missing_requirement_ids.join('、')}`)),
+    ...((audit?.untracked_files.length || 0) ? [`${audit?.untracked_files.length} 个已修改文件未加入实现追踪`] : []),
+    ...((audit?.invalid_module_links.length || 0) ? [`${audit?.invalid_module_links.length} 条需求—模块映射与设计基线不一致`] : []),
+    ...((testStrategy?.required && !testStrategy.passed) ? testStrategy.missing : []),
+    ...(engineering.test_links.some((link) => !link.test_method && !['static_analysis', 'inspection'].includes(link.evidence_kind || '')) ? ['存在旧版未分类测试证据'] : []),
+    '验证结论只覆盖已确认的需求基线、当前实现和当前运行环境',
+  ];
+  return <><ArtifactHeading eyebrow="ACCEPTANCE DELIVERY" title="完成率、风险与交付结论" detail={accepted ? '已验收' : '等待验收'} />
+    <div className="acceptance-metrics"><Metric label="需求实现" value={requirementCovered} total={engineering.requirements.length} /><Metric label="模块实现追踪" value={moduleCompleted} total={engineering.design_modules.length} /><Metric label="验收标准" value={criteriaCovered} total={criteriaTotal} /><Metric label="测试用例通过" value={testRun?.passed || 0} total={testRun?.total || 1} /></div>
+    <div className="acceptance-columns"><section><h4>剩余风险</h4><div className="risk-list">{risks.map((risk, index) => <article key={index}><span>{index === risks.length - 1 ? 'LOW' : 'MED'}</span><p>{risk}</p></article>)}</div></section><section><h4>交付文件</h4><div className="delivery-list">{deliverables.length ? deliverables.map((path) => <code key={path}>{path}</code>) : <ArtifactEmpty text="尚未绑定交付文件" />}</div></section></div>
+    <div className={`acceptance-conclusion ${accepted ? 'accepted' : ''}`}><span>{accepted ? '✓' : acceptanceDecision ? '!' : '?'}</span><div><b>{accepted ? '项目已通过用户验收' : acceptanceDecision ? '历史验收结论已失效' : '等待用户验收结论'}</b><small>{accepted ? `${accepted.option_label} · ${accepted.decided_at}` : acceptanceDecision ? '新的一致性检查发现追踪缺口，修复后需重新验收' : '完成所有质量门后，由用户确认是否接收交付物'}</small></div></div>
+  </>;
+}
+
+function Metric({ label, value, total }: { label: string; value: number; total: number }) {
+  const percent = total ? Math.round(value / total * 100) : 0;
+  return <div><b>{percent}%</b><span>{label}</span><small>{value}/{total}</small></div>;
+}
+
+function ArtifactEmpty({ text }: { text: string }) { return <div className="artifact-empty">{text}</div>; }
+
+function MermaidDiagram({ chart }: { chart: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    const container = ref.current;
+    const render = async () => {
+      try {
+        const mermaidModule = await import('mermaid');
+        mermaidModule.default.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark', fontFamily: 'ui-monospace, Consolas, monospace' });
+        const id = `yukai-diagram-${Math.random().toString(36).slice(2)}`;
+        const result = await mermaidModule.default.render(id, chart);
+        if (!cancelled && container) container.innerHTML = result.svg;
+      } catch (reason) {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : '图表渲染失败');
+      }
+    };
+    render();
+    return () => { cancelled = true; if (container) container.innerHTML = ''; };
+  }, [chart]);
+  return error ? <div className="artifact-empty error">{error}</div> : <div className="mermaid-diagram" ref={ref} />;
+}
+
+function buildClassDiagram(classes: UmlClass[], relationships: UmlRelationship[]) {
+  if (!classes.length) return '';
+  const names = new Map(classes.map((item) => [item.id, mermaidId(`C_${item.id}`)]));
+  const lines = ['classDiagram'];
+  classes.forEach((item) => {
+    const name = names.get(item.id) || mermaidId(item.id);
+    lines.push(`class ${name}["${mermaidText(item.name)}"] {`);
+    item.attributes.forEach((attribute) => lines.push(`  ${mermaidMember(attribute)}`));
+    item.methods.forEach((method) => lines.push(`  ${mermaidMember(method)}`));
+    lines.push('}');
+  });
+  const arrows: Record<UmlRelationship['type'], string> = { association: '-->', inheritance: '<|--', composition: '*--', aggregation: 'o--', dependency: '..>' };
+  relationships.forEach((item) => lines.push(`${names.get(item.from) || mermaidId(item.from)} ${arrows[item.type]} ${names.get(item.to) || mermaidId(item.to)}${item.label ? ` : ${mermaidText(item.label)}` : ''}`));
+  return lines.join('\n');
+}
+
+function buildSequenceDiagram(sequence: EngineeringSequence) {
+  const aliases = new Map(sequence.participants.map((name, index) => [name, `P${index + 1}`]));
+  const lines = ['sequenceDiagram', 'autonumber'];
+  sequence.participants.forEach((name) => lines.push(`participant ${aliases.get(name)} as ${mermaidText(name)}`));
+  sequence.steps.forEach((step) => lines.push(`${aliases.get(step.from)}${step.response ? '-->>' : '->>'}${aliases.get(step.to)}: ${mermaidText(step.message)}`));
+  return lines.join('\n');
+}
+
+function buildProcessFlowDiagram(flow: ProcessFlow) {
+  const aliases = new Map(flow.nodes.map((node) => [node.id, mermaidId(`F_${flow.id}_${node.id}`)]));
+  const lines = [`flowchart ${flow.direction || 'TD'}`];
+  flow.nodes.forEach((node) => {
+    const id = aliases.get(node.id) || mermaidId(node.id);
+    const label = mermaidText(node.label);
+    if (node.type === 'start' || node.type === 'end') lines.push(`${id}(["${label}"])`);
+    else if (node.type === 'decision') lines.push(`${id}{"${label}"}`);
+    else if (node.type === 'input_output') lines.push(`${id}[/"${label}"/]`);
+    else lines.push(`${id}["${label}"]`);
+  });
+  flow.edges.forEach((edge) => {
+    const source = aliases.get(edge.from) || mermaidId(edge.from);
+    const target = aliases.get(edge.to) || mermaidId(edge.to);
+    lines.push(edge.label ? `${source} -->|${mermaidText(edge.label)}| ${target}` : `${source} --> ${target}`);
+  });
+  return lines.join('\n');
+}
+
+function implementationPaths(engineering: EngineeringState, module: EngineeringModule) {
+  return [...new Set(engineering.implementation_links.filter((link) => link.module_ids?.includes(module.id) || (!link.module_ids && module.requirement_ids.includes(link.requirement_id))).map((link) => link.path))];
+}
+
+function moduleImplementationStatus(engineering: EngineeringState, module: EngineeringModule) {
+  const requirementIds = new Set(engineering.implementation_links.filter((link) => link.module_ids?.includes(module.id) || (!link.module_ids && module.requirement_ids.includes(link.requirement_id))).map((link) => link.requirement_id));
+  const covered = module.requirement_ids.filter((requirementId) => requirementIds.has(requirementId)).length;
+  return { covered, total: module.requirement_ids.length, complete: module.requirement_ids.length > 0 && covered === module.requirement_ids.length && implementationPaths(engineering, module).length > 0 };
+}
+
+function mermaidId(value: string) { const normalized = value.replace(/[^A-Za-z0-9_\u4e00-\u9fff]/g, '_'); return normalized || 'Unnamed'; }
+function mermaidText(value: string) { return value.replace(/[\n\r:;{}\[\]"]/g, ' ').trim(); }
+function mermaidMember(value: string) { return mermaidText(value).replace(/[<>]/g, ''); }
+function domainKindLabel(kind: DomainObject['kind']) { return ({ aggregate_root: '聚合根', entity: '实体', value_object: '值对象', domain_service: '领域服务', repository: '仓储' } as const)[kind]; }
+function testLevelLabel(level?: string) { return ({ unit: '单元', integration: '集成', system: '系统', acceptance: '验收', performance: '性能', security: '安全', static: '静态' } as Record<string, string>)[level || ''] || '未分级'; }
 
 function PlanPanel({ plan }: { plan: TaskPlan }) {
   const evidence = new Map(plan.evidence.map((item) => [item.id, item]));
